@@ -57,10 +57,13 @@ pub fn progress_ring(
     let radius = diameter / 2.0 - 6.0;
     let ring_width = (diameter * 0.045).max(4.0);
 
+    // 同样是 premultiplied alpha 的坑：RGB 分量要按 alpha 比例先乘过，
+    // 不能直接写 (255,255,255,18)（那等于几乎不透明的白），用 unmultiplied
+    // 版本更不容易犯这个错——直接给"看起来的"颜色和透明度就行。
     painter.circle_stroke(
         center,
         radius,
-        Stroke::new(ring_width, Color32::from_rgba_premultiplied(255, 255, 255, 18)),
+        Stroke::new(ring_width, Color32::from_rgba_unmultiplied(255, 255, 255, 18)),
     );
 
     let start_angle = -std::f32::consts::FRAC_PI_2;
@@ -134,7 +137,7 @@ pub fn stat_pill(ui: &mut Ui, value: &str, label: &str) {
         .inner_margin(egui::Margin::symmetric(16, 8))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(value).color(colors::TEXT_PRIMARY).strong());
+                bold_label(ui, value, 14.0, colors::TEXT_PRIMARY);
                 ui.label(egui::RichText::new(label).color(colors::TEXT_SECONDARY).small());
             });
         });

@@ -47,6 +47,9 @@ pub fn apply(ctx: &Context) {
     visuals.widgets.active.bg_fill = colors::ACCENT_BLUE_BG;
     visuals.selection.bg_fill = colors::ACCENT_BLUE_BG;
     visuals.selection.stroke = Stroke::new(1.0, colors::ACCENT_BLUE);
+    // "取消扫描"那个链接默认会用 egui 自己的蓝，跟我们的品牌蓝不是同一个色号，
+    // 混在一起会有点违和，统一成 ACCENT_BLUE。
+    visuals.hyperlink_color = colors::ACCENT_BLUE;
     visuals.window_corner_radius = CornerRadius::same(14);
     visuals.menu_corner_radius = CornerRadius::same(10);
     ctx.set_visuals(visuals);

@@ -7,7 +7,7 @@ use crate::scan::{self, CancelFlag, ScanEvent, ScanKind, Threat};
 use crate::sysmon::{self, ResourceSample, SysMonHandle};
 use crate::theme::{self, colors};
 use crate::tray::Tray;
-use crate::widgets::{self, Toast, ThreatAction};
+use crate::widgets::{self, ThreatAction, Toast};
 use eframe::egui;
 use egui::{Color32, Stroke, Vec2, ViewportCommand};
 use muda::MenuEvent;
@@ -68,7 +68,10 @@ impl ScanPageState {
     }
 
     fn is_running(&self) -> bool {
-        matches!(self.phase, ScanPhase::Enumerating { .. } | ScanPhase::Scanning { .. })
+        matches!(
+            self.phase,
+            ScanPhase::Enumerating { .. } | ScanPhase::Scanning { .. }
+        )
     }
 
     fn start(&mut self, scan_removable: bool) {
@@ -250,12 +253,25 @@ pub struct App {
     about_open: bool,
     allow_exit: bool,
     tray: Option<Tray>,
+    /// 真实美术图标的纹理，"关于"区块用它显示 logo（矢量图标那套是给功能性 UI
+    /// 用的扁平风格，这里想展示的是实际的品牌图标，所以直接贴图）。
+    app_icon_texture: egui::TextureHandle,
 }
 
 impl App {
     pub fn new(_cc: &eframe::CreationContext<'_>, tray: Option<Tray>) -> Self {
         theme::apply(&_cc.egui_ctx);
         crate::fonts::install_cjk_font(&_cc.egui_ctx);
+
+        let (icon_rgba, icon_w, icon_h) = crate::icon_data::load_app_icon(160);
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+            [icon_w as usize, icon_h as usize],
+            &icon_rgba,
+        );
+        let app_icon_texture =
+            _cc.egui_ctx
+                .load_texture("app_icon", color_image, egui::TextureOptions::LINEAR);
+
         Self {
             page: Page::Dashboard,
             config: AppConfig::load(),
@@ -268,6 +284,7 @@ impl App {
             about_open: false,
             allow_exit: false,
             tray,
+            app_icon_texture,
         }
     }
 
@@ -438,7 +455,10 @@ fn title_bar(ui: &mut egui::Ui, ctx: &egui::Context) {
                 Vec2::splat(btn_size),
             );
             let min_rect = egui::Rect::from_center_size(
-                egui::pos2(close_rect.left() - btn_gap - btn_size / 2.0, full_rect.center().y),
+                egui::pos2(
+                    close_rect.left() - btn_gap - btn_size / 2.0,
+                    full_rect.center().y,
+                ),
                 Vec2::splat(btn_size),
             );
 
@@ -458,7 +478,11 @@ fn title_bar(ui: &mut egui::Ui, ctx: &egui::Context) {
                 ui.add_space(14.0);
                 let (icon_resp, painter) =
                     ui.allocate_painter(Vec2::splat(23.0), egui::Sense::hover());
-                icons::shield_check(&painter, icon_resp.rect, Stroke::new(1.6, colors::ACCENT_BLUE));
+                icons::shield_check(
+                    &painter,
+                    icon_resp.rect,
+                    Stroke::new(1.6, colors::ACCENT_BLUE),
+                );
                 ui.add_space(8.0);
                 widgets::bold_label(ui, "CLV3000", 15.0, colors::TEXT_PRIMARY);
             });
@@ -469,8 +493,11 @@ fn title_bar(ui: &mut egui::Ui, ctx: &egui::Context) {
                 egui::pos2(min_rect.left() - btn_gap, full_rect.bottom()),
             );
             if drag_rect.width() > 0.0 {
-                let drag_resp =
-                    ui.interact(drag_rect, ui.id().with("titlebar_drag"), egui::Sense::drag());
+                let drag_resp = ui.interact(
+                    drag_rect,
+                    ui.id().with("titlebar_drag"),
+                    egui::Sense::drag(),
+                );
                 if drag_resp.drag_started() {
                     ctx.send_viewport_cmd(ViewportCommand::StartDrag);
                 }
@@ -484,7 +511,11 @@ fn title_bar_button(
     name: &str,
     draw: impl FnOnce(&egui::Painter, egui::Rect),
 ) -> bool {
-    let response = ui.interact(rect, ui.id().with(("titlebar_btn", name)), egui::Sense::click());
+    let response = ui.interact(
+        rect,
+        ui.id().with(("titlebar_btn", name)),
+        egui::Sense::click(),
+    );
     let painter = ui.painter();
     if response.hovered() {
         painter.rect_filled(rect, 6.0, colors::ACCENT_BLUE_BG);
@@ -513,12 +544,12 @@ fn sidebar(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut App) {
             draw: |p, r, s| icons::bolt(p, r, s.color),
         },
         SidebarItem {
-            page: Page::VirusDb,
-            draw: |p, r, s| icons::database(p, r, s),
-        },
-        SidebarItem {
             page: Page::FullScan,
             draw: |p, r, s| icons::hamburger(p, r, s),
+        },
+        SidebarItem {
+            page: Page::VirusDb,
+            draw: |p, r, s| icons::database(p, r, s),
         },
     ];
 
@@ -565,7 +596,8 @@ fn resource_meter(ui: &mut egui::Ui, label: &str, percent: f32) {
     painter.rect_filled(rect, 4.0, colors::BG_CARD);
     let fraction = (percent / 100.0).clamp(0.0, 1.0);
     if fraction > 0.0 {
-        let filled = egui::Rect::from_min_size(rect.min, Vec2::new(rect.width() * fraction, rect.height()));
+        let filled =
+            egui::Rect::from_min_size(rect.min, Vec2::new(rect.width() * fraction, rect.height()));
         painter.rect_filled(filled, 4.0, theme::accent_for(percent));
     }
     ui.label(
@@ -622,7 +654,10 @@ fn dashboard_page(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut App) {
         ui.add_space(6.0);
         let sub = match &app.config.last_full_scan {
             Some(r) if r.threats_found == 0 => {
-                format!("上次全盘扫描 · {} · 未发现威胁", r.time.display_relative_to(&today))
+                format!(
+                    "上次全盘扫描 · {} · 未发现威胁",
+                    r.time.display_relative_to(&today)
+                )
             }
             Some(r) => format!(
                 "上次全盘扫描 · {} · 发现 {} 个威胁",
@@ -682,15 +717,27 @@ fn action_button(
 
     let bg_shape_idx = ui.painter().add(egui::Shape::Noop);
     let response = ui
-        .allocate_ui_with_layout(desired, egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            ui.add_space(H_PAD);
-            let (icon_resp, painter) =
-                ui.allocate_painter(Vec2::splat(ICON_SIZE), egui::Sense::hover());
-            draw(&painter, icon_resp.rect, Stroke::new(1.6, colors::ACCENT_BLUE));
-            ui.add_space(ICON_GAP);
-            ui.label(egui::RichText::new(label).color(colors::TEXT_PRIMARY).strong());
-            ui.add_space(H_PAD);
-        })
+        .allocate_ui_with_layout(
+            desired,
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.add_space(H_PAD);
+                let (icon_resp, painter) =
+                    ui.allocate_painter(Vec2::splat(ICON_SIZE), egui::Sense::hover());
+                draw(
+                    &painter,
+                    icon_resp.rect,
+                    Stroke::new(1.6, colors::ACCENT_BLUE),
+                );
+                ui.add_space(ICON_GAP);
+                ui.label(
+                    egui::RichText::new(label)
+                        .color(colors::TEXT_PRIMARY)
+                        .strong(),
+                );
+                ui.add_space(H_PAD);
+            },
+        )
         .response;
 
     let bg_rect = response.rect;
@@ -725,17 +772,33 @@ fn quick_scan_page(ui: &mut egui::Ui, app: &mut App) {
 }
 
 fn full_scan_page(ui: &mut egui::Ui, app: &mut App) {
-    ui.add_space(20.0);
+    ui.add_space(16.0);
     ui.vertical_centered(|ui| {
-        centered_card(ui, 420.0, 44.0, |ui| {
+        // 卡片宽度是量出来的，不是拍脑袋写死的——不然中文标签一长就会撑破这个
+        // "看起来居中"的卡片，视觉上还是会歪（细节见 SKILL 里的坑 1 变体）。
+        const LABEL: &str = "包含可移动磁盘（U 盘等）";
+        const CHECKBOX_GLYPH: f32 = 20.0;
+        const H_PAD: f32 = 16.0;
+        let galley = ui.ctx().fonts_mut(|f| {
+            f.layout_no_wrap(
+                LABEL.to_owned(),
+                egui::FontId::proportional(14.0),
+                colors::TEXT_SECONDARY,
+            )
+        });
+        let card_width = H_PAD * 2.0 + CHECKBOX_GLYPH + 8.0 + galley.size().x;
+
+        widgets::bold_label(ui, "扫描设置", 13.0, colors::TEXT_SECONDARY);
+        ui.add_space(10.0);
+        centered_card(ui, card_width, 42.0, |ui| {
             let mut removable = app.config.scan_removable_drives;
-            if ui.checkbox(&mut removable, "包含可移动磁盘（U 盘等）").changed() {
+            if ui.checkbox(&mut removable, LABEL).changed() {
                 app.config.scan_removable_drives = removable;
                 app.config.save();
             }
         });
     });
-    ui.add_space(4.0);
+    ui.add_space(8.0);
     // 之前这里一直传 false，导致从侧边栏直接进这个页面时（不是从仪表盘点过来的）
     // Idle 状态下没有任何按钮可点，页面看起来像坏了——统一改成和闪电扫描一样有按钮。
     scan_page(
@@ -794,12 +857,18 @@ fn scan_page(
                 ui.label(egui::RichText::new(format!("准备{title}")).color(colors::TEXT_SECONDARY));
                 ui.add_space(16.0);
                 if show_start_button_when_idle
-                    && action_button(ui, &format!("开始{title}"), |p, r, s| icons::bolt(p, r, s.color))
+                    && action_button(ui, &format!("开始{title}"), |p, r, s| {
+                        icons::bolt(p, r, s.color)
+                    })
                 {
                     state.start(config.scan_removable_drives);
                 }
             }
-            ScanPhase::Enumerating { done, total, files_found } => {
+            ScanPhase::Enumerating {
+                done,
+                total,
+                files_found,
+            } => {
                 widgets::progress_ring(
                     ui,
                     220.0,
@@ -820,12 +889,23 @@ fn scan_page(
                     state.request_cancel();
                 }
             }
-            ScanPhase::Scanning { total, scanned, current_path } => {
-                let percent = total.map(|t| if t == 0 { 1.0 } else { *scanned as f32 / t as f32 });
+            ScanPhase::Scanning {
+                total,
+                scanned,
+                current_path,
+            } => {
+                let percent = total.map(|t| {
+                    if t == 0 {
+                        1.0
+                    } else {
+                        *scanned as f32 / t as f32
+                    }
+                });
                 let title_text = percent
                     .map(|p| format!("{:.0}%", p * 100.0))
                     .unwrap_or_else(|| format!("{scanned}"));
-                ui.label(egui::RichText::new(format!("正在{title}")).color(colors::TEXT_PRIMARY).strong());
+                widgets::bold_label(ui, &format!("正在{title}"), 14.0, colors::TEXT_PRIMARY);
+                ui.add_space(6.0);
                 widgets::progress_ring(ui, 220.0, percent, ring_color, &title_text, "");
                 ui.add_space(4.0);
                 ui.label(
@@ -849,9 +929,17 @@ fn scan_page(
                     state.request_cancel();
                 }
             }
-            ScanPhase::Done { scanned, elapsed, cancelled } => {
+            ScanPhase::Done {
+                scanned,
+                elapsed,
+                cancelled,
+            } => {
                 let has_threats = !state.threats.is_empty();
-                let color = if has_threats { colors::RED } else { colors::GREEN };
+                let color = if has_threats {
+                    colors::RED
+                } else {
+                    colors::GREEN
+                };
                 const DIAMETER: f32 = 140.0;
                 const GLOW_MARGIN: f32 = 50.0;
                 let (response, painter) = ui.allocate_painter(
@@ -887,7 +975,9 @@ fn scan_page(
                     .small(),
                 );
                 ui.add_space(16.0);
-                if action_button(ui, &format!("重新{title}"), |p, r, s| icons::bolt(p, r, s.color)) {
+                if action_button(ui, &format!("重新{title}"), |p, r, s| {
+                    icons::bolt(p, r, s.color)
+                }) {
                     state.start(config.scan_removable_drives);
                 }
             }
@@ -927,12 +1017,16 @@ fn scan_page(
 
 fn virus_db_page(ui: &mut egui::Ui, app: &mut App) {
     ui.vertical_centered(|ui| {
-        ui.add_space(50.0);
-        let (response, painter) = ui.allocate_painter(Vec2::splat(120.0), egui::Sense::hover());
-        icons::database(&painter, response.rect.shrink(7.0), Stroke::new(2.0, colors::ACCENT_BLUE));
-        ui.add_space(16.0);
+        ui.add_space(36.0);
+        let (response, painter) = ui.allocate_painter(Vec2::splat(96.0), egui::Sense::hover());
+        icons::database(
+            &painter,
+            response.rect.shrink(6.0),
+            Stroke::new(2.0, colors::ACCENT_BLUE),
+        );
+        ui.add_space(14.0);
         widgets::bold_label(ui, "病毒库", 18.0, colors::TEXT_PRIMARY);
-        ui.add_space(6.0);
+        ui.add_space(14.0);
 
         let available = paths::clamscan_available();
         let status = if available {
@@ -940,14 +1034,37 @@ fn virus_db_page(ui: &mut egui::Ui, app: &mut App) {
         } else {
             format!("未找到扫描引擎：{}", paths::clamav_dir().display())
         };
-        ui.label(egui::RichText::new(status).color(colors::TEXT_SECONDARY));
-        ui.label(
-            egui::RichText::new(format!("路径：{}", paths::clamav_database_dir().display()))
-                .color(colors::TEXT_MUTED)
-                .small(),
-        );
+        let path_text = format!("路径：{}", paths::clamav_database_dir().display());
 
-        ui.add_space(20.0);
+        // 状态信息包一层卡片，别让文字裸露在圆点背景上——单独两行文字堆在那没有
+        // 视觉容器，看起来像页面没做完，包一层就有"这是一块信息"的感觉了。
+        let status_galley = ui.ctx().fonts_mut(|f| {
+            f.layout_no_wrap(
+                status.clone(),
+                egui::FontId::proportional(14.0),
+                colors::TEXT_SECONDARY,
+            )
+        });
+        let path_galley = ui.ctx().fonts_mut(|f| {
+            f.layout_no_wrap(
+                path_text.clone(),
+                egui::FontId::proportional(12.0),
+                colors::TEXT_MUTED,
+            )
+        });
+        let card_width = (status_galley.size().x.max(path_galley.size().x) + 40.0).min(560.0);
+        centered_card(ui, card_width, 58.0, |ui| {
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new(&status).color(colors::TEXT_SECONDARY));
+                ui.label(
+                    egui::RichText::new(&path_text)
+                        .color(colors::TEXT_MUTED)
+                        .small(),
+                );
+            });
+        });
+
+        ui.add_space(16.0);
         let label = if app.virus_db.updating {
             "正在更新…"
         } else {
@@ -958,12 +1075,22 @@ fn virus_db_page(ui: &mut egui::Ui, app: &mut App) {
             app.toast("开始更新病毒库…");
         }
 
-        ui.add_space(40.0);
-        ui.add(egui::Separator::default().spacing(1.0).shrink(ui.available_width() * 0.25));
-        ui.add_space(24.0);
+        ui.add_space(36.0);
+        ui.add(
+            egui::Separator::default()
+                .spacing(1.0)
+                .shrink(ui.available_width() * 0.25),
+        );
+        ui.add_space(20.0);
 
-        let (logo_resp, painter) = ui.allocate_painter(Vec2::splat(74.0), egui::Sense::hover());
-        icons::shield_check(&painter, logo_resp.rect, Stroke::new(2.4, colors::ACCENT_BLUE));
+        // 关于区块用真实美术图标（贴图），跟上面功能性 UI 的矢量图标风格特意区分开——
+        // 这里是想展示"这是什么产品"，用实际品牌图标比扁平线框图标更合适。
+        let logo_size = 72.0;
+        ui.add(
+            egui::Image::new((app.app_icon_texture.id(), app.app_icon_texture.size_vec2()))
+                .fit_to_exact_size(Vec2::splat(logo_size))
+                .corner_radius(16.0),
+        );
         ui.add_space(10.0);
         widgets::bold_label(ui, "CLV3000", 17.0, colors::TEXT_PRIMARY);
         ui.add_space(4.0);
@@ -974,7 +1101,7 @@ fn virus_db_page(ui: &mut egui::Ui, app: &mut App) {
         );
         ui.add_space(6.0);
         ui.label(
-            egui::RichText::new("简约 Windows 手动杀毒工具，基于 ClamAV。")
+            egui::RichText::new("极速、可靠、高效的病毒防护程序，适合各类老旧系统和电脑")
                 .color(colors::TEXT_MUTED)
                 .small(),
         );
@@ -992,7 +1119,7 @@ fn about_window(ctx: &egui::Context, app: &mut App) {
             ui.label(format!("版本 {}", env!("CARGO_PKG_VERSION")));
             ui.add_space(8.0);
             ui.label(
-                egui::RichText::new("简约 Windows 手动杀毒工具，基于 ClamAV。")
+                egui::RichText::new("极速、可靠、高效的病毒防护程序，适合各类老旧系统和电脑。")
                     .color(colors::TEXT_SECONDARY)
                     .small(),
             );
