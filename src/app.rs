@@ -136,6 +136,13 @@ impl ScanPageState {
                         files_found,
                     };
                 }
+                ScanEvent::ScanStarted { total } => {
+                    self.phase = ScanPhase::Scanning {
+                        total,
+                        scanned: 0,
+                        current_path: String::new(),
+                    };
+                }
                 ScanEvent::FileScanned { path, infected } => {
                     let total_hint = match &self.phase {
                         ScanPhase::Enumerating { files_found, .. } => Some(*files_found),
@@ -1102,8 +1109,15 @@ fn scan_page(
                 ui.add_space(6.0);
                 widgets::progress_ring(ui, 220.0, percent, ring_color, &title_text, "");
                 ui.add_space(4.0);
+                // clamscan 启动后加载病毒库的十几秒里还没有任何 FileScanned 产出，
+                // 此时 current_path 是空的；给一行明确的"引擎启动中"提示，避免看起来卡住。
+                let status_line = if current_path.is_empty() {
+                    "Starting scan engine…".to_string()
+                } else {
+                    truncate(current_path, 60)
+                };
                 ui.label(
-                    egui::RichText::new(truncate(current_path, 60))
+                    egui::RichText::new(status_line)
                         .color(colors::TEXT_SECONDARY)
                         .small(),
                 );

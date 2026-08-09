@@ -8,7 +8,10 @@ use std::time::Duration;
 /// 短暂泵送一次平台事件队列（阻塞最多 `timeout`）。
 pub fn pump(timeout: Duration) {
     #[cfg(windows)]
-    windows_pump();
+    {
+        let _ = timeout;
+        windows_pump();
+    }
 
     #[cfg(target_os = "macos")]
     macos_pump(timeout);

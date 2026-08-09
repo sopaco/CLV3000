@@ -29,6 +29,13 @@ pub enum ScanEvent {
         processes_total: usize,
         files_found: usize,
     },
+    /// 枚举完成、clamscan 即将启动（或已启动但还在加载病毒库、尚未产出结果）。
+    /// 闪电扫描枚举完就知道文件总数了；全盘扫描不发这个事件，phase 直接从 Idle 跳到 Scanning。
+    /// 之所以单独发一个事件：clamscan 加载病毒库通常要十几秒，期间一个 FileScanned 都不会来，
+    /// 没有 ScanStarted 的话 UI 会一直停在 "Enumerating N/N processes" 看起来卡住。
+    ScanStarted {
+        total: Option<usize>,
+    },
     /// clamscan 对一个文件给出了结果。
     FileScanned {
         path: String,

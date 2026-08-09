@@ -62,6 +62,13 @@ pub fn run(tx: Sender<ScanEvent>, cancel: CancelFlag) {
         });
     }
 
+    // 枚举已经完成，文件总数已知。先发 ScanStarted 让 UI 立刻从 "Enumerating" 切到
+    // "Scanning"，否则 clamscan 加载病毒库的十几秒里 UI 会一直显示 "Enumerating N/N"。
+    let total_files = ordered_paths.len();
+    let _ = tx.send(ScanEvent::ScanStarted {
+        total: Some(total_files),
+    });
+
     let (path_tx, path_rx) = std::sync::mpsc::channel::<PathBuf>();
     let engine_cancel = cancel.clone();
     let engine_thread = std::thread::spawn(move || {
