@@ -30,7 +30,7 @@ fn windows_pump() {
     // SAFETY: 标准 Win32 消息泵；`PeekMessageW` 无窗口句柄时处理当前线程队列。
     unsafe {
         let mut msg = MSG::default();
-        while PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_REMOVE).into() {
+        while PeekMessageW(&mut msg, Some(HWND::default()), 0, 0, PM_REMOVE).into() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
