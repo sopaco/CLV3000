@@ -497,7 +497,7 @@ fn title_bar(ui: &mut egui::Ui, ctx: &egui::Context, icon_texture: &egui::Textur
                     "CLV3000",
                     15.0,
                     colors::TEXT_PRIMARY,
-                    Vec2::new(-1.0, 1.0),
+                    Vec2::new(-2.5, 2.5),
                 );
             });
 
@@ -749,10 +749,16 @@ fn action_button(
                 // 中文字体的行高内部本身就不是墨迹对称的，交给自动布局就会看起来比
                 // 图标偏高偏右。这里手动量好文字尺寸、占位后，画的时候再手动往左下
                 // 微调一点——直接控制最终落墨位置，不用猜布局系统怎么算的。
-                let (text_resp, painter) =
-                    ui.allocate_painter(text_size, egui::Sense::hover());
-                let nudge = Vec2::new(-1.0, 1.0);
-                painter.galley(text_resp.rect.min + nudge, galley.clone(), colors::TEXT_PRIMARY);
+                //
+                // 注意：不能用 `ui.allocate_painter(...)`——它返回的画笔会把裁剪框
+                // 收紧到刚分配的这一小块矩形上，往左挪的那部分笔墨会直接被裁掉
+                // （这正是"文字左边被挡住"的原因）。改用 `allocate_exact_size` 只
+                // 占位置，画的时候用 `ui.painter()`（裁剪框是整个按钮/面板那么大，
+                // 不会卡到这几像素的偏移）。
+                let (text_rect, _) = ui.allocate_exact_size(text_size, egui::Sense::hover());
+                let painter = ui.painter();
+                let nudge = Vec2::new(-2.5, 2.5);
+                painter.galley(text_rect.min + nudge, galley.clone(), colors::TEXT_PRIMARY);
                 ui.add_space(H_PAD);
             },
         )

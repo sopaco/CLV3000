@@ -104,6 +104,20 @@ egui 的字体只加载了一个字重，没有 bold 变体文件；`.strong()` 
 
 之前为了让中文和拉丁字体混排时基线好看一点，给 CJK fallback 字体加了 `y_offset_factor`。结果这个偏移只影响**画笔实际落墨的位置**，`egui::Align::Center` 用来计算居中的是**文字的布局包围盒**（`FontTweak` 文档原话："this is only a visual effect and does not affect the text layout"）——两者不是一回事。于是图标按包围盒正确居中了，文字的包围盒也居中了，但文字的墨迹在盒子里悄悄往下偏了几像素，肉眼看就是"图标和文字没对齐"。**结论：不要用 `FontTweak` 的偏移量去做"跟别的控件对齐"这件事，它解决不了这个问题，反而会制造新的错位。** 如果确实有 CJK/拉丁混排的基线问题要处理，去找视觉上更协调的字号/字体，而不是事后拿 offset 硬掰。
 
+### 坑 9：`ui.allocate_painter()` 返回的画笔会把裁剪框收紧到那一小块矩形
+
+手动微调文字/图形的落墨位置时（比如坑 8 那种"往左下角挪几像素"的补偿），如果用
+`ui.allocate_painter(size, sense)` 拿画笔，它返回的 `Painter` 裁剪框是
+`ui.clip_rect().intersect(刚分配的这个小矩形)`——比 `ui.painter()`（裁剪框是整个
+当前 `ui`，通常是整个面板那么大）小得多。这时候如果画的位置比分配的矩形还往外
+挪（比如 `rect.min + Vec2::new(-2.5, 0.0)`），挪出去的那部分笔墨会直接被裁掉，
+表现就是"文字缺了一块/被挡住一角"。
+
+**正确做法**：需要手动挪位置画东西时，用 `ui.allocate_exact_size(size, sense)`
+只占用布局空间（不产生特殊裁剪），画的时候用 `ui.painter()`（外层裁剪框足够宽松）。
+`widgets::bold_label_nudged` 一直是这么写的，`action_button` 里最早误用了
+`allocate_painter`，加上偏移后就复现了这个坑。
+
 ## 图标绘制约定（`src/icons.rs`）
 
 - 所有图标是手绘矢量（`egui::Shape` 基础图元），不依赖图标字体——保证跨平台渲染一致。
