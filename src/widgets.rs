@@ -3,6 +3,61 @@
 use crate::theme::colors;
 use egui::{Align2, Color32, FontId, Pos2, Response, Sense, Stroke, Ui, Vec2, epaint::PathStroke};
 
+/// 把一块内容在当前可用高度里整体垂直居中（水平居中沿用 `vertical_centered`）。
+///
+/// immediate-mode GUI 没法在画之前就知道内容有多高——`egui::Layout::top_down` 的
+/// `main_align` 字段名字很像"能让整块内容居中"，但读了 epaint/egui 的
+/// `next_frame_ignore_wrap` 源码就知道：TopDown 布局下主轴（纵向）永远是
+/// `Align::TOP`，`main_align` 实际只影响横向布局里"一行"内部的纵向对齐，对
+/// "纵向堆一串控件、把整串居中"这件事完全不起作用——这里最早想当然地用
+/// `allocate_ui_with_layout(avail, Layout::top_down(Align::Center), ...)` 想让它
+/// 居中，实测发现内容其实还是贴着顶部画，视觉上看起来"变居中了"只是因为顺手删掉
+/// 了原来那个硬编码的顶部 `add_space`，纯属偶然对上、没有真的居中。
+///
+/// 真正的做法：用上一帧实际测量到的内容高度，算出这一帧该留多少顶部空白
+/// （`(可用高度 - 上一帧高度) / 2`），画完之后再把这一帧的真实高度存回去。
+/// 内容高度不变时（多数时候）就是精确居中；内容一变（比如扫描状态切换、威胁
+/// 列表变长变短）会有一帧的滞后再收敛，本来就每 250ms 重绘一次，肉眼看不出来。
+pub fn vertically_centered<R>(
+    ui: &mut Ui,
+    last_height: &mut f32,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    let top_pad = ((ui.available_height() - *last_height) * 0.5).max(0.0);
+    ui.add_space(top_pad);
+    let inner = ui.vertical_centered(add_contents);
+    *last_height = inner.response.rect.height();
+    inner.inner
+}
+
+/// 一个只有图标、没有文字的小方按钮——比 `action_button` 那种"图标+文字"的
+/// 胶囊更紧凑，用在"查看完整路径"这类不需要文字说明、图标本身含义就够清楚
+/// （配合 `.on_hover_text` 兜底）的辅助操作上。尺寸固定（不用像 action_button
+/// 那样量文字宽度），调用点自己决定要不要再挂 `.on_hover_text(...)`。
+pub fn icon_only_button(
+    ui: &mut Ui,
+    size: f32,
+    draw: impl FnOnce(&egui::Painter, egui::Rect, Stroke),
+) -> Response {
+    let (response, painter) = ui.allocate_painter(Vec2::splat(size), Sense::click());
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let fill = if response.hovered() {
+        colors::ACCENT_BLUE_BG
+    } else {
+        colors::BG_CARD
+    };
+    painter.rect_filled(response.rect, 8.0, fill);
+    painter.rect_stroke(
+        response.rect,
+        8.0,
+        Stroke::new(1.0, colors::BORDER),
+        egui::epaint::StrokeKind::Inside,
+    );
+    let glyph_rect = response.rect.shrink(size * 0.26);
+    draw(&painter, glyph_rect, Stroke::new(1.6, colors::ACCENT_BLUE));
+    response
+}
+
 /// "伪粗体"文字：`.strong()` 在 egui 里其实只是换个颜色，并不会真的变粗（字体本身
 /// 只有一个字重，没有 bold 变体可选）。这里手动把同一段文字描两遍、横向错开不到
 /// 1px，模拟笔画加粗的效果——不依赖额外的粗体字体文件，跨 Windows/macOS 都一样。

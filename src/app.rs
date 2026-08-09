@@ -53,6 +53,9 @@ struct ScanPageState {
     rx: Option<Receiver<ScanEvent>>,
     threats: Vec<Threat>,
     last_error: Option<String>,
+    /// 上一帧这个页面实际画出来的内容高度，给 `widgets::vertically_centered` 用来
+    /// 算这一帧该留多少顶部空白。见该函数文档注释。
+    content_height: f32,
 }
 
 impl ScanPageState {
@@ -64,6 +67,7 @@ impl ScanPageState {
             rx: None,
             threats: Vec::new(),
             last_error: None,
+            content_height: 0.0,
         }
     }
 
@@ -177,6 +181,10 @@ impl ScanPageState {
 struct VirusDbState {
     updating: bool,
     rx: Option<Receiver<Result<(), String>>>,
+    /// 左右两栏各自的上一帧内容高度，给 `widgets::vertically_centered` 用。两栏
+    /// 内容不一样高，各自居中，不能共用一个高度。
+    status_col_height: f32,
+    about_col_height: f32,
 }
 
 impl VirusDbState {
@@ -184,6 +192,8 @@ impl VirusDbState {
         Self {
             updating: false,
             rx: None,
+            status_col_height: 0.0,
+            about_col_height: 0.0,
         }
     }
 
@@ -255,9 +265,12 @@ pub struct App {
     tray: Option<Tray>,
     /// 完整品牌图标的纹理（`icon_app.png`），"关于"区块用它显示 logo。
     app_icon_texture: egui::TextureHandle,
-    /// 简化版图标的纹理（`icon_tray.png`），自绘标题栏左上角那个小图标用它，
-    /// 跟窗口图标/托盘图标保持视觉一致。
+    /// 简化版图标的纹理（`icon_tray.png`），自绘标题栏左上角那个小图标用它
+    /// （Windows 用系统标题栏，不加载）。
+    #[cfg(not(windows))]
     titlebar_icon_texture: egui::TextureHandle,
+    /// 概览页上一帧内容高度，给 `widgets::vertically_centered` 用。
+    dashboard_content_height: f32,
 }
 
 /// 把 `icon_data::load_*_icon` 解出来的 `(rgba, w, h)` 传进 egui 的纹理系统，
@@ -276,9 +289,17 @@ impl App {
         theme::apply(&_cc.egui_ctx);
         crate::fonts::install_cjk_font(&_cc.egui_ctx);
 
-        let app_icon_texture = load_texture(&_cc.egui_ctx, "app_icon", crate::icon_data::load_app_icon(160));
-        let titlebar_icon_texture =
-            load_texture(&_cc.egui_ctx, "titlebar_icon", crate::icon_data::load_tray_icon(64));
+        let app_icon_texture = load_texture(
+            &_cc.egui_ctx,
+            "app_icon",
+            crate::icon_data::load_app_icon(160),
+        );
+        #[cfg(not(windows))]
+        let titlebar_icon_texture = load_texture(
+            &_cc.egui_ctx,
+            "titlebar_icon",
+            crate::icon_data::load_tray_icon(64),
+        );
 
         Self {
             page: Page::Dashboard,
@@ -293,7 +314,9 @@ impl App {
             allow_exit: false,
             tray,
             app_icon_texture,
+            #[cfg(not(windows))]
             titlebar_icon_texture,
+            dashboard_content_height: 0.0,
         }
     }
 
@@ -397,6 +420,7 @@ impl eframe::App for App {
         // 保持轮询节奏，这样即使窗口被隐藏到托盘，托盘点击也能在不太离谱的延迟内被处理到。
         ctx.request_repaint_after(Duration::from_millis(250));
 
+        #[cfg(not(windows))]
         title_bar(ui, &ctx, &self.titlebar_icon_texture);
 
         egui::Panel::bottom("resource_bar")
@@ -440,8 +464,10 @@ impl eframe::App for App {
     }
 }
 
+#[cfg(not(windows))]
 const TITLE_BAR_HEIGHT: f32 = 44.0;
 
+#[cfg(not(windows))]
 fn title_bar(ui: &mut egui::Ui, ctx: &egui::Context, icon_texture: &egui::TextureHandle) {
     egui::Panel::top("title_bar")
         .exact_size(TITLE_BAR_HEIGHT)
@@ -521,6 +547,7 @@ fn title_bar(ui: &mut egui::Ui, ctx: &egui::Context, icon_texture: &egui::Textur
         });
 }
 
+#[cfg(not(windows))]
 fn title_bar_button(
     ui: &mut egui::Ui,
     rect: egui::Rect,
@@ -637,8 +664,10 @@ fn dashboard_page(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut App) {
             .map(|r| r.threats_found > 0)
             .unwrap_or(false);
 
-    ui.vertical_centered(|ui| {
-        ui.add_space(60.0);
+    // 闭包里要用 `app`（navigate/quick.start/...），不能再把 `app.dashboard_content_height`
+    // 直接借给 `vertically_centered`（借用冲突）——先取出来，用完再存回去。
+    let mut content_height = app.dashboard_content_height;
+    widgets::vertically_centered(ui, &mut content_height, |ui| {
         let (color, title) = if has_threats {
             (colors::RED, "系统状态：存在风险")
         } else {
@@ -684,19 +713,44 @@ fn dashboard_page(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut App) {
         ui.label(egui::RichText::new(sub).color(colors::TEXT_SECONDARY));
 
         ui.add_space(28.0);
-        ui.horizontal(|ui| {
-            ui.add_space(ui.available_width() / 2.0 - 160.0);
-            if action_button(ui, "闪电扫描", |p, r, s| icons::bolt(p, r, s.color)) {
-                app.navigate(ctx, Page::QuickScan);
-                app.quick.start(app.config.scan_removable_drives);
-            }
-            ui.add_space(12.0);
-            if action_button(ui, "全盘扫描", icons::database) {
-                app.navigate(ctx, Page::FullScan);
-                app.full.start(app.config.scan_removable_drives);
-            }
-        });
+        // 之前这里拍了个固定的"半宽 160"去居中这两个按钮，字体/字号一变（比如这轮
+        // CJK 字体缩放）按钮实际宽度就跟着变，160 不再准，两个按钮就会整体偏左，
+        // 跟上面圆环/文字的居中轴线对不上。改成跟 `widgets::centered_stat_pills`
+        // 一样先量出这一行真正需要多宽，再用 `allocate_ui_with_layout` 居中。
+        const BTN_GAP: f32 = 12.0;
+        let row_width =
+            action_button_width(ui, "闪电扫描") + BTN_GAP + action_button_width(ui, "全盘扫描");
+        ui.allocate_ui_with_layout(
+            Vec2::new(row_width, 42.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                if action_button(ui, "闪电扫描", |p, r, s| icons::bolt(p, r, s.color)) {
+                    app.navigate(ctx, Page::QuickScan);
+                    app.quick.start(app.config.scan_removable_drives);
+                }
+                ui.add_space(BTN_GAP);
+                if action_button(ui, "全盘扫描", icons::database) {
+                    app.navigate(ctx, Page::FullScan);
+                    app.full.start(app.config.scan_removable_drives);
+                }
+            },
+        );
     });
+    app.dashboard_content_height = content_height;
+}
+
+const ACTION_BTN_ICON_SIZE: f32 = 21.0; // 原本 18，整体图标 +15% 的一部分
+const ACTION_BTN_ICON_GAP: f32 = 10.0;
+const ACTION_BTN_H_PAD: f32 = 16.0;
+const ACTION_BTN_V_PAD: f32 = 10.0;
+
+/// 量出 `action_button` 最终会占多宽——用来在外层把多个按钮组成的一行整体居中。
+/// 之前有个地方（dashboard_page 的两个按钮）拍了个固定的"半宽"常数去居中，
+/// 字体/字号一变常数就不准，按钮行跟着偏移——量出来才不会有这个问题，跟
+/// `widgets::centered_stat_pills` 是同一个思路。
+fn action_button_width(ui: &egui::Ui, label: &str) -> f32 {
+    let text_w = widgets::measure_text_width(ui, label, 14.0);
+    ACTION_BTN_H_PAD * 2.0 + ACTION_BTN_ICON_SIZE + ACTION_BTN_ICON_GAP + text_w
 }
 
 /// 一个"图标 + 文字"的胶囊按钮。
@@ -709,15 +763,27 @@ fn dashboard_page(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut App) {
 ///
 /// 解决办法是自己先量出图标+文字真正需要的尺寸，把这个"小尺寸"传给
 /// `allocate_ui_with_layout`，父容器的 `Align::Center` 才有东西可对齐。
+///
+/// 大部分调用点只关心"点没点击"，用 `action_button`（返回 `bool`）就够；病毒库
+/// 页的"查看完整路径"按钮还需要挂 `.on_hover_text(...)` 做 tooltip，那种场景要
+/// 拿到完整的 `Response`，用 `action_button_response`。
 fn action_button(
     ui: &mut egui::Ui,
     label: &str,
     draw: impl FnOnce(&egui::Painter, egui::Rect, Stroke),
 ) -> bool {
-    const ICON_SIZE: f32 = 21.0; // 原本 18，整体图标 +15% 的一部分
-    const ICON_GAP: f32 = 10.0;
-    const H_PAD: f32 = 16.0;
-    const V_PAD: f32 = 10.0;
+    action_button_response(ui, label, draw).clicked()
+}
+
+fn action_button_response(
+    ui: &mut egui::Ui,
+    label: &str,
+    draw: impl FnOnce(&egui::Painter, egui::Rect, Stroke),
+) -> egui::Response {
+    const ICON_SIZE: f32 = ACTION_BTN_ICON_SIZE;
+    const ICON_GAP: f32 = ACTION_BTN_ICON_GAP;
+    const H_PAD: f32 = ACTION_BTN_H_PAD;
+    const V_PAD: f32 = ACTION_BTN_V_PAD;
 
     let font_id = egui::FontId::proportional(14.0);
     let galley = ui
@@ -782,7 +848,7 @@ fn action_button(
     );
     ui.painter().set(bg_shape_idx, egui::Shape::Rect(shape));
 
-    interact.clicked()
+    interact
 }
 
 fn quick_scan_page(ui: &mut egui::Ui, app: &mut App) {
@@ -815,6 +881,9 @@ fn full_scan_page(ui: &mut egui::Ui, app: &mut App) {
 
 /// 一个内容"量多少占多少"的居中卡片：宽高固定，父容器的居中布局才有东西可对齐
 /// （原理和 `action_button` 里说的一样，`Frame` 自己没法参与外层的 `Align::Center`）。
+/// 病毒库状态那处原本用它包"内置病毒库已就绪"，反馈说看起来像个不能点的按钮、
+/// 很丑，改成裸文字了——这个函数暂时没有调用点，但仍是个好用的通用样式，先保留。
+#[allow(dead_code)]
 fn centered_card(
     ui: &mut egui::Ui,
     width: f32,
@@ -855,8 +924,12 @@ fn scan_page(
     icon: fn(&egui::Painter, egui::Rect, Stroke),
     show_start_button_when_idle: bool,
 ) {
-    ui.vertical_centered(|ui| {
-        ui.add_space(24.0);
+    // 跟 dashboard_page 一样：内容少（Idle/Done 态、没有威胁列表）时用上一帧测量到
+    // 的高度把这一帧的空白平分到上下，不让内容整体贴着顶部。内容比可用高度还高时
+    // （威胁列表很长）`vertically_centered` 内部的 `.max(0.0)` 会让顶部空白归零，
+    // 自然向下溢出，不会比原来的写法更差。
+    let mut content_height = state.content_height;
+    widgets::vertically_centered(ui, &mut content_height, |ui| {
         match &state.phase {
             ScanPhase::Idle => {
                 // 仪表盘页那种"大圆环 + 图标"的视觉语言在这里也来一份，跟概览页
@@ -874,8 +947,7 @@ fn scan_page(
                 ui.add_space(14.0);
                 ui.label(egui::RichText::new(format!("准备{title}")).color(colors::TEXT_SECONDARY));
                 ui.add_space(16.0);
-                if show_start_button_when_idle
-                    && action_button(ui, &format!("开始{title}"), icon)
+                if show_start_button_when_idle && action_button(ui, &format!("开始{title}"), icon)
                 {
                     state.start(config.scan_removable_drives);
                 }
@@ -1026,6 +1098,7 @@ fn scan_page(
             config.add_ignored(t.path.display().to_string(), t.virus_name);
         }
     });
+    state.content_height = content_height;
 }
 
 fn virus_db_page(ui: &mut egui::Ui, app: &mut App) {
@@ -1038,7 +1111,9 @@ fn virus_db_page(ui: &mut egui::Ui, app: &mut App) {
 
 /// 左栏：病毒库状态 + 手动更新交互。
 fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
-    ui.vertical_centered(|ui| {
+    // 同 dashboard_page/scan_page 的居中写法，见 `widgets::vertically_centered`。
+    let mut content_height = app.virus_db.status_col_height;
+    widgets::vertically_centered(ui, &mut content_height, |ui| {
         let (response, painter) = ui.allocate_painter(Vec2::splat(96.0), egui::Sense::hover());
         icons::database(
             &painter,
@@ -1051,62 +1126,82 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
 
         let available = paths::clamscan_available();
         let status = if available {
-            "内置病毒库已就绪".to_string()
+            "内置病毒库已就绪"
         } else {
-            format!("未找到扫描引擎：{}", paths::clamav_dir().display())
+            "未找到扫描引擎"
         };
-        let path_text = format!("路径：{}", paths::clamav_database_dir().display());
+        let detail_dir = if available {
+            paths::clamav_database_dir()
+        } else {
+            paths::clamav_dir()
+        };
+        let path_display = detail_dir.display().to_string();
 
-        // 状态信息包一层卡片，别让文字裸露在圆点背景上——单独两行文字堆在那没有
-        // 视觉容器，看起来像页面没做完，包一层就有"这是一块信息"的感觉了。
-        let status_galley = ui.ctx().fonts_mut(|f| {
-            f.layout_no_wrap(
-                status.clone(),
-                egui::FontId::proportional(14.0),
-                colors::TEXT_SECONDARY,
-            )
-        });
-        let path_galley = ui.ctx().fonts_mut(|f| {
-            f.layout_no_wrap(
-                path_text.clone(),
-                egui::FontId::proportional(12.0),
-                colors::TEXT_MUTED,
-            )
-        });
-        // 卡片最大宽度不能超过这一栏的可用宽度，不然会溢出到右栏那边去。
-        let card_width = (status_galley.size().x.max(path_galley.size().x) + 40.0)
-            .min(ui.available_width() - 8.0);
-        centered_card(ui, card_width, 58.0, |ui| {
-            ui.vertical(|ui| {
-                ui.label(egui::RichText::new(&status).color(colors::TEXT_SECONDARY));
-                ui.label(
-                    egui::RichText::new(&path_text)
-                        .color(colors::TEXT_MUTED)
-                        .small(),
-                );
-            });
-        });
+        // 状态文字之前包了一层卡片，看起来跟旁边真正能点的按钮长一个样、却点
+        // 不动，容易让人以为是个坏了的按钮——改成裸文字，旁边挂一个小小的图标
+        // 按钮（hover 出完整路径），不用文字说明也够直观，整体不再像个按钮。
+        const INFO_ICON_SIZE: f32 = 26.0;
+        const INFO_GAP: f32 = 8.0;
+        let status_w = widgets::measure_text_width(ui, status, 14.0);
+        // `ui.label(...)` 是个"裸"部件（跟 action_button_width 注释里说的
+        // allocate_painter/allocate_exact_size 一样），egui 会在它后面自动追加
+        // 一份 item_spacing，再叠加下面显式的 `INFO_GAP`——量宽度的时候得把这份
+        // 自动间距也算进去，不然这一行会比按钮行整体偏左几像素。
+        let status_row_w =
+            status_w + ui.spacing().item_spacing.x + INFO_GAP + INFO_ICON_SIZE;
+        ui.allocate_ui_with_layout(
+            Vec2::new(status_row_w, INFO_ICON_SIZE),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.label(egui::RichText::new(status).color(colors::TEXT_SECONDARY));
+                ui.add_space(INFO_GAP);
+                widgets::icon_only_button(ui, INFO_ICON_SIZE, icons::info_circle)
+                    .on_hover_text(path_display.as_str());
+            },
+        );
 
         ui.add_space(16.0);
-        let label = if app.virus_db.updating {
+        // "打开所在文件夹"和"手动更新病毒库"放同一行——都是这一栏里的辅助操作，
+        // 分两行意义不大，合一行更紧凑。宽度量出来再居中，见 `action_button_width`
+        // 的注释。
+        let update_label = if app.virus_db.updating {
             "正在更新…"
         } else {
             "手动更新病毒库"
         };
-        if action_button(ui, label, icons::database) && !app.virus_db.updating {
-            app.virus_db.start_update();
-            app.toast("开始更新病毒库…");
-        }
+        const BTN_GAP: f32 = 12.0;
+        let row_width =
+            action_button_width(ui, "打开所在文件夹") + BTN_GAP + action_button_width(ui, update_label);
+        ui.allocate_ui_with_layout(
+            Vec2::new(row_width, 42.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                if action_button(ui, "打开所在文件夹", icons::folder) {
+                    // 文件夹不一定存在（比如引擎没找到、数据库还没更新过一次）——
+                    // 先确保目录存在再打开，不然系统文件管理器会直接报错。
+                    paths::ensure_dir(&detail_dir);
+                    if let Err(e) = paths::open_in_file_explorer(&detail_dir) {
+                        app.toast(e);
+                    }
+                }
+                ui.add_space(BTN_GAP);
+                if action_button(ui, update_label, icons::database) && !app.virus_db.updating {
+                    app.virus_db.start_update();
+                    app.toast("开始更新病毒库…");
+                }
+            },
+        );
     });
+    app.virus_db.status_col_height = content_height;
 }
 
 /// 右栏：关于（真实品牌图标 + 名称 + 版本 + 简介）。
-fn virus_db_about_column(ui: &mut egui::Ui, app: &App) {
-    ui.vertical_centered(|ui| {
-        ui.add_space(20.0);
+fn virus_db_about_column(ui: &mut egui::Ui, app: &mut App) {
+    let mut content_height = app.virus_db.about_col_height;
+    widgets::vertically_centered(ui, &mut content_height, |ui| {
         // 用真实美术图标（贴图），跟左栏功能性 UI 的矢量图标风格特意区分开——
         // 这里是想展示"这是什么产品"，用实际品牌图标比扁平线框图标更合适。
-        let logo_size = 72.0;
+        let logo_size = 90.0; // 原本 72，+25%
         ui.add(
             egui::Image::new((app.app_icon_texture.id(), app.app_icon_texture.size_vec2()))
                 .fit_to_exact_size(Vec2::splat(logo_size))
@@ -1127,6 +1222,7 @@ fn virus_db_about_column(ui: &mut egui::Ui, app: &App) {
                 .small(),
         );
     });
+    app.virus_db.about_col_height = content_height;
 }
 
 fn about_window(ctx: &egui::Context, app: &mut App) {

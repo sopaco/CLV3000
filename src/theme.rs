@@ -7,6 +7,7 @@ pub mod colors {
 
     pub const BG_APP: Color32 = Color32::from_rgb(10, 13, 18);
     pub const BG_SIDEBAR: Color32 = Color32::from_rgb(6, 8, 11);
+    #[cfg(not(windows))]
     pub const BG_TITLEBAR: Color32 = Color32::from_rgb(8, 10, 14);
     pub const BG_CARD: Color32 = Color32::from_rgb(18, 22, 29);
     pub const BORDER: Color32 = Color32::from_rgb(34, 40, 50);
@@ -58,9 +59,34 @@ pub fn apply(ctx: &Context) {
     visuals.menu_corner_radius = CornerRadius::same(10);
     ctx.set_visuals(visuals);
 
-    ctx.global_style_mut(|style| {
+    // `global_style_mut`/`all_styles_mut` 其实落到的是同一份东西：`Options::style()`
+    // 是按 `theme()` 算出来的 getter，直接返回 `dark_style`（本项目固定深色主题），
+    // 跟 `all_styles_mut` 改的 `dark_style` 是同一个对象——上一轮以为是"改错了 API
+    // 没生效"，读源码确认了并不是这个问题，`all_styles_mut` 留着（顺手也设置了
+    // light_style，防御性），但这不是"文字还是很小"的真正原因。
+    //
+    // 真正原因是它跟 CJK 缩放（见 fonts.rs 的 CJK_SCALE）撞在一起了：CJK 后备字体
+    // 不缩放时，中文字形本身比拉丁字母"胖" 25%，所以之前 Small=9px 的中文说明文字
+    // 实际视觉高度是 9*1.25≈11.25px，看起来没那么夸张；加了 0.8 倍缩放把这个 25%
+    // 的"虚高"修正掉之后，中文字号从此变成"名义多大、视觉就多大"，于是把 Small
+    // 提到 12px，视觉只从 11.25px 涨到 12px——只涨了 7%，人眼基本感觉不出来。
+    // 这里直接把 Small 提到跟 Body 一样大（14px），不再保留"说明文字比正文小一档"
+    // 这个层级，确保有肉眼可见的变化。
+    ctx.all_styles_mut(|style| {
         style.spacing.item_spacing = egui::vec2(10.0, 10.0);
         style.spacing.button_padding = egui::vec2(14.0, 8.0);
+
+        style.text_styles = [
+            (egui::TextStyle::Small, egui::FontId::proportional(14.0)),
+            (egui::TextStyle::Body, egui::FontId::proportional(14.0)),
+            (egui::TextStyle::Button, egui::FontId::proportional(14.0)),
+            (egui::TextStyle::Heading, egui::FontId::proportional(19.0)),
+            (
+                egui::TextStyle::Monospace,
+                egui::FontId::new(14.0, egui::FontFamily::Monospace),
+            ),
+        ]
+        .into();
     });
 }
 
