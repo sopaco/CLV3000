@@ -20,11 +20,24 @@ source: .
 ## Structure
 
   - Cargo.toml
+  - LICENSE
+  - .agents/
+    - skills/
+  - .claude/
+    - skills/
   - Cargo.lock
   - README.md
   - .cargo/
     - config.toml
   - .gitignore
+  - AGENTS.md
+  - assets/
+    - backgrounds/
+    - icons/
+    - introduce_clv3000.png
+  - .codegraph/
+    - codegraph.db
+    - .gitignore
   - src/
     - icons.rs
     - config.rs
@@ -35,6 +48,7 @@ source: .
     - tray.rs
     - scan/
     - localtime.rs
+    - fonts.rs
     - main.rs
     - app.rs
     - widgets.rs
