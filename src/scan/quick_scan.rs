@@ -23,10 +23,10 @@ use mock::{modules_of_process, snapshot_pids};
 
 /// 阻塞执行，调用者需要自己 spawn 一个线程来跑它。
 ///
-/// 分两步走，和全盘扫描的"边发现边扫"不一样：
+/// 分两步走，和全盘扫描不一样：
 /// 1. 先把进程和模块枚举完（这一步很快，通常一两秒内），拿到去重后的完整文件列表，
 ///    这样才能给出准确的"总数"，UI 上才能画出确定的百分比进度环。
-/// 2. 枚举完成后再启动 clamscan，把文件列表喂给它。
+/// 2. 枚举完成后把文件列表交给 clamscan 一次性扫描（engine.rs 写入临时文件 + --file-list）。
 pub fn run(tx: Sender<ScanEvent>, cancel: CancelFlag) {
     let pids = snapshot_pids();
     let processes_total = pids.len();
@@ -69,22 +69,9 @@ pub fn run(tx: Sender<ScanEvent>, cancel: CancelFlag) {
         total: Some(total_files),
     });
 
-    let (path_tx, path_rx) = std::sync::mpsc::channel::<PathBuf>();
-    let engine_cancel = cancel.clone();
-    let engine_thread = std::thread::spawn(move || {
-        engine::run(path_rx, tx, engine_cancel);
-    });
-
-    for path in ordered_paths {
-        if cancel.load(Ordering::SeqCst) {
-            break;
-        }
-        if path_tx.send(path).is_err() {
-            break;
-        }
-    }
-    drop(path_tx);
-    let _ = engine_thread.join();
+    // engine::run 阻塞执行，内部把 paths 写入临时文件、spawn clamscan、逐行解析 stdout。
+    // tx 的所有权在此转移给 engine，engine 在结束时发 Finished。
+    engine::run(ordered_paths, tx, cancel);
 }
 
 #[cfg(windows)]

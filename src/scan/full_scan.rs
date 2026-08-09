@@ -1,8 +1,8 @@
 //! 全盘扫描：枚举本地固定磁盘，按可执行文件扩展名过滤后交给 clamscan。
 //!
-//! 关键设计：遍历到的路径**边发现边喂**给 clamscan 的 stdin（走 engine.rs），
-//! 不会先攒一个完整文件列表再开始扫，这样用户能立刻看到进度在动，
-//! 也不会因为要保存"全部文件列表"而占用内存。
+//! 流程：先遍历磁盘收集所有可执行文件路径（walk），再把完整列表交给 engine.rs
+//! 一次性扫描。不再使用 stdin 流式喂路径——ClamAV 1.5.x 的 `--file-list=-` 不支持
+//! stdin，必须写入临时文件，所以只能先收集完整列表。
 //!
 //! 非 Windows（macOS/Linux 开发机预览）：磁盘枚举（`GetLogicalDrives`/`GetDriveTypeW`）
 //! 是 Win32 API，这里不去扫真实的 mac 文件系统（也扫不出什么"可执行文件"，还白白
@@ -10,7 +10,7 @@
 
 use super::engine;
 use super::{CancelFlag, ScanEvent};
-use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
 
 /// 阻塞执行，调用者需要自己 spawn 一个线程来跑它。
@@ -19,20 +19,25 @@ pub fn run(tx: Sender<ScanEvent>, cancel: CancelFlag, include_removable: bool) {
     #[cfg(not(windows))]
     let _ = include_removable;
 
-    let (path_tx, path_rx) = std::sync::mpsc::channel::<PathBuf>();
-
-    let engine_cancel = cancel.clone();
-    let engine_thread = std::thread::spawn(move || {
-        engine::run(path_rx, tx, engine_cancel);
-    });
-
+    // 1. 遍历磁盘，收集所有可执行文件路径。
+    //    全盘扫描不知道总数（遍历完才知道），所以 total 传 None，UI 显示"已扫描 N 个"而非百分比。
     #[cfg(windows)]
-    real::walk(&path_tx, &cancel, include_removable);
+    let paths = real::walk(&cancel, include_removable);
     #[cfg(not(windows))]
-    mock::walk(&path_tx, &cancel);
+    let paths = mock::walk(&cancel);
 
-    drop(path_tx);
-    let _ = engine_thread.join();
+    if cancel.load(Ordering::SeqCst) {
+        let _ = tx.send(ScanEvent::Finished {
+            scanned: 0,
+            elapsed: std::time::Duration::ZERO,
+            cancelled: true,
+        });
+        return;
+    }
+
+    // 2. 交给 engine 扫描。tx 的所有权在此转移给 engine。
+    //    全盘扫描的 phase 已经在 start() 里设成 Scanning 了（和闪电扫描不同，不需要 ScanStarted）。
+    engine::run(paths, tx, cancel);
 }
 
 #[cfg(windows)]
@@ -40,7 +45,6 @@ mod real {
     use super::CancelFlag;
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
-    use std::sync::mpsc::Sender;
     use walkdir::WalkDir;
 
     /// 参与扫描的可执行文件扩展名白名单（大小写不敏感）。
@@ -51,8 +55,10 @@ mod real {
     const DRIVE_FIXED: u32 = 3;
     const DRIVE_REMOVABLE: u32 = 2;
 
-    pub fn walk(path_tx: &Sender<PathBuf>, cancel: &CancelFlag, include_removable: bool) {
+    /// 遍历本地磁盘，收集所有匹配白名单扩展名的文件路径。
+    pub fn walk(cancel: &CancelFlag, include_removable: bool) -> Vec<PathBuf> {
         let roots = local_drive_roots(include_removable);
+        let mut paths = Vec::new();
 
         'roots: for root in roots {
             for entry in WalkDir::new(&root)
@@ -69,11 +75,10 @@ mod real {
                 if !has_executable_extension(entry.path()) {
                     continue;
                 }
-                if path_tx.send(entry.path().to_path_buf()).is_err() {
-                    break 'roots;
-                }
+                paths.push(entry.path().to_path_buf());
             }
         }
+        paths
     }
 
     fn has_executable_extension(path: &std::path::Path) -> bool {
@@ -121,7 +126,6 @@ mod mock {
     use super::CancelFlag;
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
-    use std::sync::mpsc::Sender;
 
     const APP_NAMES: &[&str] = &[
         "Chrome", "Office", "Adobe", "Steam", "Zoom", "Slack", "VSCode", "Docker", "Python",
@@ -129,19 +133,15 @@ mod mock {
     ];
     const EXTENSIONS: &[&str] = &["exe", "dll", "sys"];
 
-    pub fn walk(path_tx: &Sender<PathBuf>, cancel: &CancelFlag) {
+    pub fn walk(cancel: &CancelFlag) -> Vec<PathBuf> {
         const TOTAL: usize = 3000;
+        let mut paths = Vec::with_capacity(TOTAL + 1);
 
         // 保证至少有一个"看起来可疑"的路径，方便预览威胁卡片 UI（是否真的被
         // 标红取决于 engine mock 那边这一轮是不是"该翻到有威胁的一面"）。
-        if path_tx
-            .send(PathBuf::from(
-                r"C:\Users\Alice\Downloads\setup_crack_v2.exe",
-            ))
-            .is_err()
-        {
-            return;
-        }
+        paths.push(PathBuf::from(
+            r"C:\Users\Alice\Downloads\setup_crack_v2.exe",
+        ));
 
         for i in 0..TOTAL {
             if cancel.load(Ordering::SeqCst) {
@@ -149,12 +149,10 @@ mod mock {
             }
             let app = APP_NAMES[i % APP_NAMES.len()];
             let ext = EXTENSIONS[i % EXTENSIONS.len()];
-            let path = PathBuf::from(format!(
+            paths.push(PathBuf::from(format!(
                 r"C:\Program Files\{app}\bin\module_{i}.{ext}"
-            ));
-            if path_tx.send(path).is_err() {
-                break;
-            }
+            )));
         }
+        paths
     }
 }

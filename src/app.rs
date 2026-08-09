@@ -1113,9 +1113,9 @@ fn scan_page(
                 current_path,
             } => {
                 // clamscan 启动后先加载病毒库（十几秒），这段时间 current_path 是空的、
-                // 一个 FileScanned 都没来。用旋转不定进度环 + "Starting scan engine…" 区分
-                // "引擎启动中" 和 "正在逐文件扫描"；两种状态都显示实时已用时长，让用户
-                // 知道进度在走、不是卡死。
+                // 一个 FileScanned 都没来。全盘扫描在 walk 磁盘阶段也是空 current_path。
+                // 用旋转不定进度环 + "Preparing scan…" 区分"准备中"和"正在逐文件扫描"；
+                // 两种状态都显示实时已用时长，让用户知道进度在走、不是卡死。
                 let starting = current_path.is_empty();
                 let percent = if starting {
                     None
@@ -1146,7 +1146,7 @@ fn scan_page(
                 );
                 ui.add_space(4.0);
                 let status_line = if starting {
-                    "Loading virus database…".to_string()
+                    "Preparing scan…".to_string()
                 } else {
                     truncate(current_path, 60)
                 };
