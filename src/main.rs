@@ -21,9 +21,11 @@ fn main() {
         return;
     }
 
-    let (icon_rgba, icon_w, icon_h) = icon_data::load_app_icon();
+    // 窗口图标可以大一点（任务栏/切换窗口时看得清），托盘图标按系统惯例给小图。
+    let (win_icon_rgba, win_icon_w, win_icon_h) = icon_data::load_app_icon(128);
+    let (tray_icon_rgba, tray_icon_w, tray_icon_h) = icon_data::load_app_icon(32);
 
-    let tray = match tray::build(icon_rgba.clone(), icon_w, icon_h) {
+    let tray = match tray::build(tray_icon_rgba, tray_icon_w, tray_icon_h) {
         Ok(t) => Some(t),
         Err(e) => {
             eprintln!("托盘图标初始化失败，将以无托盘模式运行：{e}");
@@ -32,9 +34,9 @@ fn main() {
     };
 
     let window_icon = egui::IconData {
-        rgba: icon_rgba,
-        width: icon_w,
-        height: icon_h,
+        rgba: win_icon_rgba,
+        width: win_icon_w,
+        height: win_icon_h,
     };
 
     let native_options = eframe::NativeOptions {

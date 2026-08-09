@@ -8,7 +8,6 @@
 //! 每帧 `try_recv` 一次；配合每帧一次的 `request_repaint_after`，实测延迟可以接受
 //! （最坏情况几百毫秒），换来的是不用碰 eframe 内部实现细节。
 
-use crate::icon_data;
 use muda::{Menu, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
@@ -26,7 +25,9 @@ pub struct Tray {
     pub ids: TrayMenuIds,
 }
 
-pub fn build() -> anyhow::Result<Tray> {
+/// `icon_rgba`/`icon_w`/`icon_h`：调用者传进来的托盘图标（RGBA8），由 `icon_data::load_app_icon`
+/// 解码内嵌的正式美术图标得到，这里不再自己生成占位图标。
+pub fn build(icon_rgba: Vec<u8>, icon_w: u32, icon_h: u32) -> anyhow::Result<Tray> {
     let show_item = MenuItem::new("显示主窗口", true, None);
     let quick_item = MenuItem::new("闪电扫描", true, None);
     let about_item = MenuItem::new("关于", true, None);
@@ -48,8 +49,7 @@ pub fn build() -> anyhow::Result<Tray> {
         &quit_item,
     ])?;
 
-    let rgba = icon_data::shield_rgba(32, [58, 160, 224, 255], [0, 0, 0, 0]);
-    let icon = Icon::from_rgba(rgba, 32, 32)?;
+    let icon = Icon::from_rgba(icon_rgba, icon_w, icon_h)?;
 
     let icon = TrayIconBuilder::new()
         .with_menu(Box::new(menu))

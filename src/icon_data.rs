@@ -6,18 +6,23 @@
 /// 正式图标原始 PNG 字节，编译期嵌入。
 static APP_ICON_PNG: &[u8] = include_bytes!("../assets/icons/icon_app.png");
 
-/// 解码内嵌的正式图标，返回 `(rgba, width, height)`，窗口图标和托盘图标共用同一份。
-pub fn load_app_icon() -> (Vec<u8>, u32, u32) {
+/// 解码内嵌的正式图标并缩放到 `size x size`，返回 `(rgba, width, height)`。
+/// 源图是 1254x1254 的，比窗口图标/托盘图标实际需要的尺寸大得多，解码后统一缩小，
+/// 不然平白占内存（老机器友好）；窗口图标建议大一点（比如 128），托盘图标按系统
+/// 惯例给小图（比如 32）。
+pub fn load_app_icon(size: u32) -> (Vec<u8>, u32, u32) {
     match image::load_from_memory(APP_ICON_PNG) {
         Ok(img) => {
-            let rgba = img.to_rgba8();
+            // Triangle 比 Lanczos3 便宜很多，缩小到图标这种尺寸肉眼看不出差别，
+            // 老机器上启动时这一下缩放能省不少时间。
+            let resized = img.resize_exact(size, size, image::imageops::FilterType::Triangle);
+            let rgba = resized.to_rgba8();
             let (w, h) = rgba.dimensions();
             (rgba.into_raw(), w, h)
         }
         Err(_) => {
             // 正常情况下编译时打包的图片不会解码失败，这里只是防御性兜底。
-            const SIZE: u32 = 64;
-            (shield_rgba(SIZE, [58, 160, 224, 255], [0, 0, 0, 0]), SIZE, SIZE)
+            (shield_rgba(size, [58, 160, 224, 255], [0, 0, 0, 0]), size, size)
         }
     }
 }

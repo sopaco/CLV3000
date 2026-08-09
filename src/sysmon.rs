@@ -48,12 +48,34 @@ pub fn spawn() -> SysMonHandle {
         sys.refresh_cpu_usage();
         std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
 
+        // 系统级 CPU/内存本来就是全机器汇总的数字，其它进程一动就会跳一下，是正常
+        // 现象，不是这个程序占用有问题；但每秒原始值直接怼到 UI 上看着确实很闹，
+        // 这里用一个简单的指数滑动平均把曲线捋顺一点，牺牲一点实时性换取不那么跳。
+        const SMOOTHING: f32 = 0.3; // 越小越平滑（但跟手慢），越大越贴近原始读数
+        let mut smoothed_cpu: Option<f32> = None;
+        let mut smoothed_mem: Option<f64> = None;
+
         while !stop_flag.load(Ordering::SeqCst) {
             sys.refresh_cpu_usage();
             sys.refresh_memory();
+
+            let raw_cpu = sys.global_cpu_usage();
+            let cpu = match smoothed_cpu {
+                Some(prev) => prev + (raw_cpu - prev) * SMOOTHING,
+                None => raw_cpu,
+            };
+            smoothed_cpu = Some(cpu);
+
+            let raw_mem = sys.used_memory() as f64;
+            let mem = match smoothed_mem {
+                Some(prev) => prev + (raw_mem - prev) * SMOOTHING as f64,
+                None => raw_mem,
+            };
+            smoothed_mem = Some(mem);
+
             let sample = ResourceSample {
-                cpu_percent: sys.global_cpu_usage(),
-                mem_used_bytes: sys.used_memory(),
+                cpu_percent: cpu,
+                mem_used_bytes: mem.round() as u64,
                 mem_total_bytes: sys.total_memory(),
             };
             if tx.send(sample).is_err() {

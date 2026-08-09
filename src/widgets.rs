@@ -3,6 +3,23 @@
 use crate::theme::colors;
 use egui::{Align2, Color32, FontId, Pos2, Response, Sense, Stroke, Ui, Vec2, epaint::PathStroke};
 
+/// "伪粗体"文字：`.strong()` 在 egui 里其实只是换个颜色，并不会真的变粗（字体本身
+/// 只有一个字重，没有 bold 变体可选）。这里手动把同一段文字描两遍、横向错开不到
+/// 1px，模拟笔画加粗的效果——不依赖额外的粗体字体文件，跨 Windows/macOS 都一样。
+pub fn bold_label(ui: &mut Ui, text: &str, size: f32, color: Color32) -> Response {
+    const OFFSET: f32 = 0.6;
+    let font_id = FontId::proportional(size);
+    let galley = ui
+        .ctx()
+        .fonts_mut(|f| f.layout_no_wrap(text.to_owned(), font_id, color));
+    let desired = galley.size() + Vec2::new(OFFSET, 0.0);
+    let (rect, response) = ui.allocate_exact_size(desired, Sense::hover());
+    let painter = ui.painter();
+    painter.galley(rect.min, galley.clone(), color);
+    painter.galley(rect.min + Vec2::new(OFFSET, 0.0), galley, color);
+    response
+}
+
 /// 在圆心周围画一层柔和的"光晕"：从外到内几层半透明同色圆叠加，模拟发光/辉光效果。
 /// egui 没有现成的高斯模糊，这是最简单的近似——层数越多越顺滑，但也越费一点绘制开销，
 /// 这里几层就够用，调用者要记得留够画布空间（半径 + 光晕扩散量），别被裁掉。
@@ -129,6 +146,60 @@ pub enum ThreatAction {
     Ignore,
 }
 
+/// 威胁卡片上"隔离"/"忽略"用的小胶囊按钮。不用 `egui::Button` 是因为想让两个按钮
+/// 的尺寸/圆角/居中方式完全统一可控（`egui::Button` 默认样式在深色红卡片背景上
+/// 对比度不太对，两个按钮风格也不一致）。`filled=true` 是红底白字的"隔离"，
+/// `filled=false` 是描边的"忽略"。
+fn pill_button(ui: &mut Ui, label: &str, filled: bool) -> bool {
+    const H_PAD: f32 = 14.0;
+    const V_PAD: f32 = 7.0;
+
+    let text_color = if filled { Color32::WHITE } else { colors::TEXT_SECONDARY };
+    let font_id = FontId::proportional(13.0);
+    let galley = ui
+        .ctx()
+        .fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font_id, text_color));
+    let text_size = galley.size();
+    let desired = Vec2::new(H_PAD * 2.0 + text_size.x, V_PAD * 2.0 + text_size.y);
+
+    let bg_idx = ui.painter().add(egui::Shape::Noop);
+    let response = ui
+        .allocate_ui_with_layout(desired, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.add_space(H_PAD);
+            ui.label(egui::RichText::new(label).color(text_color));
+            ui.add_space(H_PAD);
+        })
+        .response;
+
+    let bg_rect = response.rect;
+    let interact = ui.interact(bg_rect, response.id.with("pill"), Sense::click());
+    let (fill, stroke) = if filled {
+        let fill = if interact.hovered() {
+            Color32::from_rgb(224, 74, 74)
+        } else {
+            colors::RED
+        };
+        (fill, Stroke::NONE)
+    } else {
+        let fill = if interact.hovered() {
+            colors::BG_CARD
+        } else {
+            Color32::TRANSPARENT
+        };
+        (fill, Stroke::new(1.0, colors::RED_BORDER))
+    };
+    let shape = egui::epaint::RectShape::new(
+        bg_rect,
+        egui::CornerRadius::same(255),
+        fill,
+        stroke,
+        egui::epaint::StrokeKind::Inside,
+    );
+    ui.painter().set(bg_idx, egui::Shape::Rect(shape));
+
+    interact.clicked()
+}
+
 /// 威胁详情卡片：红色警示样式 + 隔离/忽略按钮。
 pub fn threat_card(ui: &mut Ui, virus_name: &str, path: &str) -> ThreatAction {
     let mut action = ThreatAction::None;
@@ -139,7 +210,7 @@ pub fn threat_card(ui: &mut Ui, virus_name: &str, path: &str) -> ThreatAction {
         .inner_margin(egui::Margin::same(14))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let icon_size = 34.0;
+                let icon_size = 39.0; // 原本 34，图标整体 +15% 的一部分
                 let (icon_response, painter) =
                     ui.allocate_painter(Vec2::splat(icon_size), Sense::hover());
                 let icon_rect = icon_response.rect;
@@ -155,12 +226,7 @@ pub fn threat_card(ui: &mut Ui, virus_name: &str, path: &str) -> ThreatAction {
                 ui.add_space(6.0);
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(virus_name)
-                                .color(colors::TEXT_PRIMARY)
-                                .strong()
-                                .size(15.0),
-                        );
+                        bold_label(ui, virus_name, 15.0, colors::TEXT_PRIMARY);
                         egui::Frame::default()
                             .fill(colors::RED)
                             .corner_radius(999.0)
@@ -177,19 +243,11 @@ pub fn threat_card(ui: &mut Ui, virus_name: &str, path: &str) -> ThreatAction {
                 });
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add(egui::Button::new(
-                            egui::RichText::new("忽略").color(colors::TEXT_SECONDARY),
-                        ))
-                        .clicked()
-                    {
+                    if pill_button(ui, "忽略", false) {
                         action = ThreatAction::Ignore;
                     }
-                    let quarantine_btn = egui::Button::new(
-                        egui::RichText::new("隔离").color(Color32::WHITE).strong(),
-                    )
-                    .fill(colors::RED);
-                    if ui.add(quarantine_btn).clicked() {
+                    ui.add_space(8.0);
+                    if pill_button(ui, "隔离", true) {
                         action = ThreatAction::Quarantine;
                     }
                 });

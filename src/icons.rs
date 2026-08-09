@@ -98,8 +98,9 @@ pub fn database(painter: &Painter, rect: Rect, stroke: Stroke) {
     let cx = rect.center().x;
     let rx = rect.width() * 0.40;
     let ry = rect.height() * 0.12;
-    let top_y = rect.top() + rect.height() * 0.18;
-    let bottom_y = rect.bottom() - rect.height() * 0.10;
+    // 上下留白对称，不然整个图标看起来会偏下，跟旁边的文字/图标对不齐。
+    let top_y = rect.top() + rect.height() * 0.14;
+    let bottom_y = rect.bottom() - rect.height() * 0.14;
 
     let top_center = Pos2::new(cx, top_y);
     let bottom_center = Pos2::new(cx, bottom_y);
