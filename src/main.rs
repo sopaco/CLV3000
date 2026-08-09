@@ -16,6 +16,7 @@ mod sysmon;
 mod theme;
 mod tray;
 mod tray_loop;
+mod tray_pump;
 mod widgets;
 
 use app::AppCore;

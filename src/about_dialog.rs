@@ -21,6 +21,7 @@ pub fn show_standalone() {
 
     let native_options = eframe::NativeOptions {
         viewport: about_viewport_builder(window_icon),
+        centered: true,
         ..Default::default()
     };
 

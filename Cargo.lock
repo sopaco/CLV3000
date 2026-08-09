@@ -313,6 +313,7 @@ name = "clv3000"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "core-foundation",
  "directories",
  "eframe",
  "egui",
