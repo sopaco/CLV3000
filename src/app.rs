@@ -748,9 +748,25 @@ const ACTION_BTN_V_PAD: f32 = 10.0;
 /// 之前有个地方（dashboard_page 的两个按钮）拍了个固定的"半宽"常数去居中，
 /// 字体/字号一变常数就不准，按钮行跟着偏移——量出来才不会有这个问题，跟
 /// `widgets::centered_stat_pills` 是同一个思路。
+///
+/// 这里的 `+ 2.0 * item_spacing`：`action_button` 内部是拿 `ui.add_space` 手动摆
+/// 图标/文字间距的，但图标和文字本身还是走 `allocate_painter`/`allocate_exact_size`
+/// 正常的部件分配路径，egui 会在每个部件放完之后**额外**把 `item_spacing` 计入
+/// 光标（这是 `advance_after_rects` 的行为，跟手动 `add_space` 是否存在无关）。
+/// 于是 `action_button` 实际总宽比"内边距+图标+间距+文字"这几个手动常数加起来
+/// 还要再宽两份 `item_spacing`（图标后一份、文字后一份）。量的时候漏了这个，
+/// 按钮行整体会比算出来的居中位置偏右——这行代码就是补上这个差。
+///
+/// （这条注释和下面这一行代码之前已经加过一次、后来在别的改动里意外弄丢了——
+/// 症状是"闪电扫描/全盘扫描"按钮行肉眼可见地偏右，跟上面圆环/文字对不齐。
+/// 如果这个问题再出现，先检查这一行是不是又被误删了。）
 fn action_button_width(ui: &egui::Ui, label: &str) -> f32 {
     let text_w = widgets::measure_text_width(ui, label, 14.0);
-    ACTION_BTN_H_PAD * 2.0 + ACTION_BTN_ICON_SIZE + ACTION_BTN_ICON_GAP + text_w
+    ACTION_BTN_H_PAD * 2.0
+        + ACTION_BTN_ICON_SIZE
+        + ACTION_BTN_ICON_GAP
+        + text_w
+        + 2.0 * ui.spacing().item_spacing.x
 }
 
 /// 一个"图标 + 文字"的胶囊按钮。
@@ -947,10 +963,16 @@ fn scan_page(
                 ui.add_space(14.0);
                 ui.label(egui::RichText::new(format!("准备{title}")).color(colors::TEXT_SECONDARY));
                 ui.add_space(16.0);
-                if show_start_button_when_idle && action_button(ui, &format!("开始{title}"), icon)
-                {
-                    state.start(config.scan_removable_drives);
-                }
+                const START_BTN_SHIFT_LEFT: f32 = 2.0;
+                ui.horizontal(|ui| {
+                    let label = format!("开始{title}");
+                    let btn_w = action_button_width(ui, &label);
+                    let left = (ui.available_width() - btn_w) / 2.0 - START_BTN_SHIFT_LEFT;
+                    ui.add_space(left.max(0.0));
+                    if show_start_button_when_idle && action_button(ui, &label, icon) {
+                        state.start(config.scan_removable_drives);
+                    }
+                });
             }
             ScanPhase::Enumerating {
                 done,
@@ -1147,8 +1169,7 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
         // allocate_painter/allocate_exact_size 一样），egui 会在它后面自动追加
         // 一份 item_spacing，再叠加下面显式的 `INFO_GAP`——量宽度的时候得把这份
         // 自动间距也算进去，不然这一行会比按钮行整体偏左几像素。
-        let status_row_w =
-            status_w + ui.spacing().item_spacing.x + INFO_GAP + INFO_ICON_SIZE;
+        let status_row_w = status_w + ui.spacing().item_spacing.x + INFO_GAP + INFO_ICON_SIZE;
         ui.allocate_ui_with_layout(
             Vec2::new(status_row_w, INFO_ICON_SIZE),
             egui::Layout::left_to_right(egui::Align::Center),
@@ -1170,8 +1191,9 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
             "手动更新病毒库"
         };
         const BTN_GAP: f32 = 12.0;
-        let row_width =
-            action_button_width(ui, "打开所在文件夹") + BTN_GAP + action_button_width(ui, update_label);
+        let row_width = action_button_width(ui, "打开所在文件夹")
+            + BTN_GAP
+            + action_button_width(ui, update_label);
         ui.allocate_ui_with_layout(
             Vec2::new(row_width, 42.0),
             egui::Layout::left_to_right(egui::Align::Center),
