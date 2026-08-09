@@ -50,6 +50,10 @@ pub fn apply(ctx: &Context) {
     // "取消扫描"那个链接默认会用 egui 自己的蓝，跟我们的品牌蓝不是同一个色号，
     // 混在一起会有点违和，统一成 ACCENT_BLUE。
     visuals.hyperlink_color = colors::ACCENT_BLUE;
+    // 鼠标悬停在任何可点击元素上都换成手型指针——这个设置只对标准 `egui::Button`
+    // 生效，我们自己拿 `ui.interact()` 手搓的按钮（action_button/pill_button/
+    // 侧边栏图标/标题栏按钮）还得各自显式 `.on_hover_cursor(...)`，见那几处调用点。
+    visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
     visuals.window_corner_radius = CornerRadius::same(14);
     visuals.menu_corner_radius = CornerRadius::same(10);
     ctx.set_visuals(visuals);

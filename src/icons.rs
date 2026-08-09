@@ -20,24 +20,53 @@ fn polyline(points: &[Pos2], stroke: Stroke, closed: bool) -> Shape {
     Shape::line(pts, PathStroke::from(stroke))
 }
 
-/// 盾牌轮廓（六边形近似）。
-pub fn shield(painter: &Painter, rect: Rect, stroke: Stroke, fill: Option<Color32>) {
-    let pts: Vec<Pos2> = [
-        (0.50, 0.03),
-        (0.90, 0.16),
-        (0.85, 0.55),
-        (0.50, 0.97),
-        (0.15, 0.55),
-        (0.10, 0.16),
-    ]
-    .iter()
-    .map(|&(u, v)| map(rect, u, v))
-    .collect();
+/// 采样一段二次贝塞尔曲线（`p0` 到 `p2`，`p1` 是控制点），返回 `segments+1` 个点。
+fn quad_bezier(p0: Pos2, p1: Pos2, p2: Pos2, segments: usize) -> Vec<Pos2> {
+    (0..=segments)
+        .map(|i| {
+            let t = i as f32 / segments as f32;
+            let mt = 1.0 - t;
+            Pos2::new(
+                mt * mt * p0.x + 2.0 * mt * t * p1.x + t * t * p2.x,
+                mt * mt * p0.y + 2.0 * mt * t * p1.y + t * t * p2.y,
+            )
+        })
+        .collect()
+}
 
+/// 盾牌轮廓的控制点：参考常见开源图标集（Feather/Heroicons 一类）里盾牌图标的
+/// 比例手绘的一套新坐标——顶部两肩用曲线过渡、两侧收窄、底部收成一个圆润的尖，
+/// 不再是纯直线拼出来的六边形，看起来更精致一点。6 段二次贝塞尔首尾相接、
+/// 从正上方开始顺时针绕一圈，天然闭合（最后一段终点等于起点）。
+fn shield_outline(rect: Rect, segments_per_curve: usize) -> Vec<Pos2> {
+    const CURVES: [((f32, f32), (f32, f32)); 6] = [
+        ((0.82, 0.06), (0.93, 0.24)), // 顶部中点 -> 右肩
+        ((0.91, 0.44), (0.80, 0.60)), // 右肩 -> 右腰
+        ((0.80, 0.86), (0.50, 0.97)), // 右腰 -> 底部尖
+        ((0.20, 0.86), (0.20, 0.60)), // 底部尖 -> 左腰
+        ((0.09, 0.44), (0.07, 0.24)), // 左腰 -> 左肩
+        ((0.17, 0.06), (0.50, 0.04)), // 左肩 -> 顶部中点
+    ];
+
+    let mut cur = map(rect, 0.50, 0.04);
+    let mut pts = vec![cur];
+    for &((cu, cv), (eu, ev)) in &CURVES {
+        let ctrl = map(rect, cu, cv);
+        let end = map(rect, eu, ev);
+        pts.extend(quad_bezier(cur, ctrl, end, segments_per_curve).into_iter().skip(1));
+        cur = end;
+    }
+    pts
+}
+
+/// 盾牌轮廓。
+pub fn shield(painter: &Painter, rect: Rect, stroke: Stroke, fill: Option<Color32>) {
+    let pts = shield_outline(rect, 8);
     if let Some(fill) = fill {
         painter.add(Shape::convex_polygon(pts.clone(), fill, Stroke::NONE));
     }
-    painter.add(polyline(&pts, stroke, true));
+    // 轮廓采样点首尾已经重合（闭合曲线），直接画折线就是闭合的，不用再补一段。
+    painter.add(Shape::line(pts, PathStroke::from(stroke)));
 }
 
 /// 盾牌 + 中间一个勾选标记，仪表盘"安全"状态用。

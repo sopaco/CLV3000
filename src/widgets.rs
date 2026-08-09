@@ -143,6 +143,47 @@ pub fn stat_pill(ui: &mut Ui, value: &str, label: &str) {
         });
 }
 
+/// 量出一段文字在给定字号下的真实渲染宽度。用来在摆放前就知道"这块东西到底
+/// 多宽"，而不是猜一个固定值——扫描过程中数字会变（比如 "5 / 342" 变成
+/// "128 / 342"），猜的固定宽度会跟着跑偏，量出来的不会。
+pub fn measure_text_width(ui: &Ui, text: &str, size: f32) -> f32 {
+    ui.ctx().fonts_mut(|f| {
+        f.layout_no_wrap(text.to_owned(), FontId::proportional(size), Color32::WHITE)
+    })
+    .size()
+    .x
+}
+
+/// `stat_pill` 实际渲染宽度的估算：内边距(16*2) + 边框(1*2) + value/label 间距(10，
+/// 全局 item_spacing) + 两段文字宽度。value 走的是 `bold_label`（横向多描 0.6px）。
+fn stat_pill_width(ui: &Ui, value: &str, label: &str) -> f32 {
+    let value_w = measure_text_width(ui, value, 14.0) + 0.6;
+    let label_w = measure_text_width(ui, label, 14.0 * 0.85); // `.small()` 约等于正文的 85%
+    16.0 * 2.0 + 1.0 * 2.0 + 10.0 + value_w + label_w
+}
+
+/// 居中摆放一行 `stat_pill`，宽度是量出来的，不是猜的——配合 SKILL 里"坑 1"的
+/// 说明：外层 `vertical_centered` 只有拿到准确的 `desired_size` 才能正确居中。
+pub fn centered_stat_pills(ui: &mut Ui, pills: &[(String, &str)]) {
+    const GAP: f32 = 8.0;
+    let mut total_width = 0.0;
+    for (i, (value, label)) in pills.iter().enumerate() {
+        if i > 0 {
+            total_width += GAP;
+        }
+        total_width += stat_pill_width(ui, value, label);
+    }
+    let desired = Vec2::new(total_width, 40.0);
+    ui.allocate_ui_with_layout(desired, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        for (i, (value, label)) in pills.iter().enumerate() {
+            if i > 0 {
+                ui.add_space(GAP);
+            }
+            stat_pill(ui, value, label);
+        }
+    });
+}
+
 pub enum ThreatAction {
     None,
     Quarantine,
@@ -175,7 +216,9 @@ fn pill_button(ui: &mut Ui, label: &str, filled: bool) -> bool {
         .response;
 
     let bg_rect = response.rect;
-    let interact = ui.interact(bg_rect, response.id.with("pill"), Sense::click());
+    let interact = ui
+        .interact(bg_rect, response.id.with("pill"), Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
     let (fill, stroke) = if filled {
         let fill = if interact.hovered() {
             Color32::from_rgb(224, 74, 74)

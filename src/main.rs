@@ -21,9 +21,11 @@ fn main() {
         return;
     }
 
+    // 窗口图标/托盘图标用简化版（icon_tray.png）：细节少，缩到任务栏/托盘那种
+    // 小尺寸也认得清楚；带文字的完整版（icon_app.png）留给"关于"页那种画得大的地方。
     // 窗口图标可以大一点（任务栏/切换窗口时看得清），托盘图标按系统惯例给小图。
-    let (win_icon_rgba, win_icon_w, win_icon_h) = icon_data::load_app_icon(128);
-    let (tray_icon_rgba, tray_icon_w, tray_icon_h) = icon_data::load_app_icon(32);
+    let (win_icon_rgba, win_icon_w, win_icon_h) = icon_data::load_tray_icon(128);
+    let (tray_icon_rgba, tray_icon_w, tray_icon_h) = icon_data::load_tray_icon(32);
 
     let tray = match tray::build(tray_icon_rgba, tray_icon_w, tray_icon_h) {
         Ok(t) => Some(t),

@@ -57,7 +57,7 @@ version: 0.1.0
 
 `egui::Frame::show(ui, ...)` 和 `ui.horizontal(...)` 在被外层 `vertical_centered`/`Align::Center` 布局调用时，会把自己的"期望尺寸"报成父容器**当前的全部可用宽度**（因为内容画完之前不知道真实大小，只能先占住最大空间）。结果就是：外层想居中一个"看起来应该是小按钮"的东西，实际拿到的是一个和容器一样宽的东西，居中直接失效——表现为按钮从最左边一路铺到很宽的位置，而不是一颗居中的小胶囊。
 
-**正确做法**：自己先用 `ui.ctx().fonts_mut(|f| f.layout_no_wrap(text, font_id, color))` 量出文字的真实尺寸，加上图标/内边距算出准确的 `desired_size`，再用 `ui.allocate_ui_with_layout(desired_size, layout, |ui| {...})` 分配——**不要**直接用 `Frame::show` 或裸的 `ui.horizontal` 去包一个需要被外层居中的组件。背景色用"占位 Shape + 事后回填"的技巧：
+**正确做法**：自己先用 `widgets::measure_text_width(ui, text, size)`（内部就是 `ui.ctx().fonts_mut(|f| f.layout_no_wrap(...))`）量出文字的真实尺寸，加上图标/内边距算出准确的 `desired_size`，再用 `ui.allocate_ui_with_layout(desired_size, layout, |ui| {...})` 分配——**不要**直接用 `Frame::show` 或裸的 `ui.horizontal` 去包一个需要被外层居中的组件。背景色用"占位 Shape + 事后回填"的技巧：
 
 ```rust
 let bg_idx = ui.painter().add(egui::Shape::Noop);
@@ -66,9 +66,9 @@ let shape = egui::epaint::RectShape::new(response.rect, corner_radius, fill, str
 ui.painter().set(bg_idx, egui::Shape::Rect(shape));
 ```
 
-参考实现：`app.rs` 的 `action_button`、`centered_card`；`widgets.rs` 的 `pill_button`。
+参考实现：`app.rs` 的 `action_button`、`centered_card`；`widgets.rs` 的 `pill_button`、`stat_pill`/`centered_stat_pills`（一行多个胶囊一起居中，宽度是每个胶囊量出来后加总的，不是猜的）。
 
-**同一个坑的变体**：即使用了上面这套"量尺寸"手法，如果 `desired_size` 是**拍脑袋写死的固定值**（比如"这个设置卡片应该 420px 宽"），一旦实际内容（比如 checkbox 的文字标签）比这个固定值还宽，内容会溢出这个"看起来居中"的容器边界，视觉上还是会显得歪/不对称。**固定宽度只能给不会变的内容用，任何带文字的内容都要量出来，不要猜。**
+**同一个坑的变体**：即使用了上面这套"量尺寸"手法，如果 `desired_size` 是**拍脑袋写死的固定值**（比如"这个设置卡片应该 420px 宽"），一旦实际内容（比如 checkbox 的文字标签）比这个固定值还宽，内容会溢出这个"看起来居中"的容器边界，视觉上还是会显得歪/不对称。**固定宽度只能给不会变的内容用，任何带文字、且文字会变化（扫描过程中的数字、用户输入……）的内容都要量出来，不要猜。**静态、不会变的文字（比如仪表盘那两个固定按钮"闪电扫描"/"全盘扫描"）拍一个校准过的偏移量问题不大，但能量出来就尽量量。
 
 ### 坑 2：`RichText::strong()` 只换颜色，不换字重
 
@@ -95,6 +95,10 @@ egui 的字体只加载了一个字重，没有 bold 变体文件；`.strong()` 
 ### 坑 6：想要精确对齐的按钮，别用 `ui.horizontal` 的光标累加去猜位置
 
 自绘标题栏的最小化/关闭按钮最早是用"剩余宽度减一个估算值"算拖拽区宽度，估算有偏差，按钮位置就跟着飘。**正确做法**：先拿 `ui.max_rect()`，直接算出每个按钮的精确 `Rect`（比如"贴着右边缘留 8px"），用 `ui.interact(rect, id, Sense::click())` 在这个固定矩形上做点击检测，不走光标布局。
+
+### 坑 7：`ui.interact()` 手搓的按钮不会自动显示手型光标
+
+`egui::Button` 之类的标准控件会看 `Visuals::interact_cursor` 这个全局样式自动换手型光标（本项目在 `theme::apply` 里设成了 `Some(CursorIcon::PointingHand)`），但我们自己拿 `ui.interact(rect, id, Sense::click())` 或 `ui.allocate_painter(size, Sense::click())` 手搓的按钮（`action_button`/`pill_button`/侧边栏图标/标题栏按钮）**不会**自动读这个全局设置——每一处都要显式 `.on_hover_cursor(egui::CursorIcon::PointingHand)`。新增自定义可点击元素时记得补这一句。
 
 ## 图标绘制约定（`src/icons.rs`）
 
