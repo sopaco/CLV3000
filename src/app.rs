@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tray_icon::TrayIconEvent;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -56,6 +56,9 @@ struct ScanPageState {
     rx: Option<Receiver<ScanEvent>>,
     threats: Vec<Threat>,
     last_error: Option<String>,
+    /// 扫描启动时刻；用于在 Scanning 阶段实时显示已用时长（clamscan 加载病毒库的
+    /// 十几秒里没有任何 FileScanned 事件，靠这个让用户知道没卡死）。
+    started_at: Option<Instant>,
     /// 上一帧这个页面实际画出来的内容高度，给 `widgets::vertically_centered` 用来
     /// 算这一帧该留多少顶部空白。见该函数文档注释。
     content_height: f32,
@@ -70,6 +73,7 @@ impl ScanPageState {
             rx: None,
             threats: Vec::new(),
             last_error: None,
+            started_at: None,
             content_height: 0.0,
         }
     }
@@ -87,6 +91,7 @@ impl ScanPageState {
         }
         self.threats.clear();
         self.last_error = None;
+        self.started_at = Some(Instant::now());
         let cancel = scan::new_cancel_flag();
         let (tx, rx) = std::sync::mpsc::channel();
         self.cancel = Some(cancel.clone());
@@ -120,10 +125,21 @@ impl ScanPageState {
     }
 
     /// 返回 `Some((scanned, elapsed, cancelled))` 当这一批事件里出现了 `Finished`。
+    ///
+    /// 每帧最多处理 `MAX_EVENTS_PER_FRAME` 个事件：clamscan 的 stdout 在管道上是块缓冲的，
+    /// 整个扫描过程的结果常常在进程退出时一次性 flush 进 channel。如果一帧全排空，
+    /// phase 会从 `Scanning(0)` 直接跳到 `Done`，UI 永远画不到中间的计数爬升过程。
+    /// 限流后突发的事件被分摊到连续几帧渲染，用户能肉眼看到 "1/109 → 2/109 → …"。
+    /// `Finished` 也会因此晚几帧到达（最多 `count / MAX_EVENTS_PER_FRAME` 帧），可忽略。
     fn poll(&mut self, config: &AppConfig) -> Option<(usize, Duration, bool)> {
+        const MAX_EVENTS_PER_FRAME: usize = 4;
         let mut finished = None;
+        let mut processed = 0usize;
         let Some(rx) = &self.rx else { return None };
-        while let Ok(event) = rx.try_recv() {
+        while processed < MAX_EVENTS_PER_FRAME
+            && let Ok(event) = rx.try_recv()
+        {
+            processed += 1;
             match event {
                 ScanEvent::Enumerating {
                     processes_done,
@@ -177,6 +193,7 @@ impl ScanPageState {
                         elapsed,
                         cancelled,
                     };
+                    self.started_at = None;
                     finished = Some((scanned, elapsed, cancelled));
                 }
                 ScanEvent::Error(e) => {
@@ -1095,24 +1112,41 @@ fn scan_page(
                 scanned,
                 current_path,
             } => {
-                let percent = total.map(|t| {
-                    if t == 0 {
-                        1.0
-                    } else {
-                        *scanned as f32 / t as f32
-                    }
-                });
-                let title_text = percent
-                    .map(|p| format!("{:.0}%", p * 100.0))
-                    .unwrap_or_else(|| format!("{scanned}"));
-                widgets::bold_label(ui, &format!("Running {title}"), 14.0, colors::TEXT_PRIMARY);
+                // clamscan 启动后先加载病毒库（十几秒），这段时间 current_path 是空的、
+                // 一个 FileScanned 都没来。用旋转不定进度环 + "Starting scan engine…" 区分
+                // "引擎启动中" 和 "正在逐文件扫描"；两种状态都显示实时已用时长，让用户
+                // 知道进度在走、不是卡死。
+                let starting = current_path.is_empty();
+                let percent = if starting {
+                    None
+                } else {
+                    total.map(|t| if t == 0 { 1.0 } else { *scanned as f32 / t as f32 })
+                };
+                let title_text = if starting {
+                    "Starting".to_string()
+                } else {
+                    percent
+                        .map(|p| format!("{:.0}%", p * 100.0))
+                        .unwrap_or_else(|| format!("{scanned}"))
+                };
+                let heading = if starting {
+                    format!("Starting {title}")
+                } else {
+                    format!("Running {title}")
+                };
+                widgets::bold_label(ui, &heading, 14.0, colors::TEXT_PRIMARY);
                 ui.add_space(6.0);
-                widgets::progress_ring(ui, 220.0, percent, ring_color, &title_text, "");
+                widgets::progress_ring(
+                    ui,
+                    220.0,
+                    percent,
+                    ring_color,
+                    &title_text,
+                    if starting { "scan engine" } else { "" },
+                );
                 ui.add_space(4.0);
-                // clamscan 启动后加载病毒库的十几秒里还没有任何 FileScanned 产出，
-                // 此时 current_path 是空的；给一行明确的"引擎启动中"提示，避免看起来卡住。
-                let status_line = if current_path.is_empty() {
-                    "Starting scan engine…".to_string()
+                let status_line = if starting {
+                    "Loading virus database…".to_string()
                 } else {
                     truncate(current_path, 60)
                 };
@@ -1121,6 +1155,14 @@ fn scan_page(
                         .color(colors::TEXT_SECONDARY)
                         .small(),
                 );
+                ui.add_space(4.0);
+                if let Some(started) = state.started_at.as_ref() {
+                    ui.label(
+                        egui::RichText::new(format!("Elapsed {}", format_duration(started.elapsed())))
+                            .color(colors::TEXT_SECONDARY)
+                            .small(),
+                    );
+                }
                 ui.add_space(16.0);
                 let first_pill = match total {
                     Some(t) => (format!("{scanned} / {t}"), "files"),
@@ -1134,6 +1176,9 @@ fn scan_page(
                 if ui.link("Cancel Scan").clicked() {
                     state.request_cancel();
                 }
+                // 旋转环靠 time 推进、已用时长每秒变化、事件限流后还有积压要继续排空——
+                // 三者都需要持续重绘，否则一停下来界面就静止了。
+                ui.ctx().request_repaint();
             }
             ScanPhase::Done {
                 scanned,
