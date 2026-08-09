@@ -24,8 +24,7 @@ fn query_engine_version() -> String {
         return "Not found (clamscan.exe missing)".to_string();
     }
     match run_clamscan_version_flag() {
-        Ok(text) => parse_engine_from_clamscan_v(&text)
-            .unwrap_or_else(|| first_line(&text)),
+        Ok(text) => parse_engine_from_clamscan_v(&text).unwrap_or_else(|| first_line(&text)),
         Err(e) => format!("Unavailable ({e})"),
     }
 }
@@ -35,8 +34,7 @@ fn query_database_version() -> String {
         return summarize_database_files();
     }
     match run_clamscan_version_flag() {
-        Ok(text) => parse_database_from_clamscan_v(&text)
-            .unwrap_or_else(summarize_database_files),
+        Ok(text) => parse_database_from_clamscan_v(&text).unwrap_or_else(summarize_database_files),
         Err(_) => summarize_database_files(),
     }
 }
@@ -66,7 +64,7 @@ fn run_clamscan_version_flag() -> Result<String, String> {
 
 #[cfg(not(windows))]
 fn run_clamscan_version_flag() -> Result<String, String> {
-    Ok("ClamAV 0.1.0 (dev preview)/10001/Thu Jan  1 00:00:00 2026".to_string())
+    Ok("ClamAV 0.7.0 (dev preview)/10001/Thu Jan  1 00:00:00 2031".to_string())
 }
 
 fn parse_engine_from_clamscan_v(line: &str) -> Option<String> {
