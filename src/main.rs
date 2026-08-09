@@ -81,6 +81,7 @@ fn main() {
                         width: window_icon.width,
                         height: window_icon.height,
                     }),
+                    centered: true,
                     ..Default::default()
                 };
 
