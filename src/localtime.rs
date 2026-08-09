@@ -24,10 +24,10 @@ impl Timestamp {
     /// 渲染成"今天 09:12" / "8月8日 09:12" 这种展示文案，`today` 用于判断是否是当天。
     pub fn display_relative_to(&self, today: &Timestamp) -> String {
         if self.year == today.year && self.month == today.month && self.day == today.day {
-            format!("今天 {:02}:{:02}", self.hour, self.minute)
+            format!("Today {:02}:{:02}", self.hour, self.minute)
         } else {
             format!(
-                "{}月{}日 {:02}:{:02}",
+                "{:02}/{:02} {:02}:{:02}",
                 self.month, self.day, self.hour, self.minute
             )
         }

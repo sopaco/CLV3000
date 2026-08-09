@@ -86,7 +86,7 @@ pub fn open_in_file_explorer(dir: &Path) -> Result<(), String> {
         .creation_flags(0x0800_0000)
         .spawn()
         .map(|_| ())
-        .map_err(|e| format!("无法打开文件夹：{e}"))
+        .map_err(|e| format!("Failed to open folder: {e}"))
 }
 
 /// macOS 开发机预览用：`open` 是 macOS 上等价的"用 Finder 打开这个目录"命令。
@@ -96,5 +96,5 @@ pub fn open_in_file_explorer(dir: &Path) -> Result<(), String> {
         .arg(dir)
         .spawn()
         .map(|_| ())
-        .map_err(|e| format!("无法打开文件夹：{e}"))
+        .map_err(|e| format!("Failed to open folder: {e}"))
 }

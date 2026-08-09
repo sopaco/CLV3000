@@ -28,10 +28,10 @@ pub struct Tray {
 /// `icon_rgba`/`icon_w`/`icon_h`：调用者传进来的托盘图标（RGBA8），由 `icon_data::load_app_icon`
 /// 解码内嵌的正式美术图标得到，这里不再自己生成占位图标。
 pub fn build(icon_rgba: Vec<u8>, icon_w: u32, icon_h: u32) -> anyhow::Result<Tray> {
-    let show_item = MenuItem::new("显示主窗口", true, None);
-    let quick_item = MenuItem::new("闪电扫描", true, None);
-    let about_item = MenuItem::new("关于", true, None);
-    let quit_item = MenuItem::new("退出", true, None);
+    let show_item = MenuItem::new("Show Main Window", true, None);
+    let quick_item = MenuItem::new("Quick Scan", true, None);
+    let about_item = MenuItem::new("About", true, None);
+    let quit_item = MenuItem::new("Quit", true, None);
 
     let ids = TrayMenuIds {
         show: show_item.id().clone(),
@@ -54,7 +54,7 @@ pub fn build(icon_rgba: Vec<u8>, icon_w: u32, icon_h: u32) -> anyhow::Result<Tra
     let icon = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_icon(icon)
-        .with_tooltip("CLV3000 - 简约安全软件")
+        .with_tooltip("CLV3000 - Lightweight Security")
         .build()?;
 
     Ok(Tray { icon, ids })

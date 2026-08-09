@@ -3,7 +3,6 @@
 
 mod app;
 mod config;
-mod fonts;
 mod icon_data;
 mod icons;
 mod localtime;
@@ -30,7 +29,7 @@ fn main() {
     let tray = match tray::build(tray_icon_rgba, tray_icon_w, tray_icon_h) {
         Ok(t) => Some(t),
         Err(e) => {
-            eprintln!("托盘图标初始化失败，将以无托盘模式运行：{e}");
+            eprintln!("Failed to initialize tray icon; running without system tray: {e}");
             None
         }
     };

@@ -239,8 +239,8 @@ fn run_freshclam() -> Result<(), String> {
 
     match cmd.status() {
         Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(format!("更新病毒库失败，退出码 {status}")),
-        Err(e) => Err(format!("无法启动 freshclam：{e}")),
+        Ok(status) => Err(format!("Database update failed with exit code {status}")),
+        Err(e) => Err(format!("Failed to start freshclam: {e}")),
     }
 }
 
@@ -287,7 +287,6 @@ fn load_texture(
 impl App {
     pub fn new(_cc: &eframe::CreationContext<'_>, tray: Option<Tray>) -> Self {
         theme::apply(&_cc.egui_ctx);
-        crate::fonts::install_cjk_font(&_cc.egui_ctx);
 
         let app_icon_texture = load_texture(
             &_cc.egui_ctx,
@@ -389,8 +388,8 @@ impl App {
         }
         if let Some(result) = self.virus_db.poll() {
             match result {
-                Ok(()) => self.toast("病毒库更新完成"),
-                Err(e) => self.toast(format!("病毒库更新失败：{e}")),
+                Ok(()) => self.toast("Database update complete"),
+                Err(e) => self.toast(format!("Database update failed: {e}")),
             }
         }
     }
@@ -518,13 +517,7 @@ fn title_bar(ui: &mut egui::Ui, ctx: &egui::Context, icon_texture: &egui::Textur
                         .fit_to_exact_size(Vec2::splat(22.0)),
                 );
                 ui.add_space(8.0);
-                widgets::bold_label_nudged(
-                    ui,
-                    "CLV3000",
-                    15.0,
-                    colors::TEXT_PRIMARY,
-                    Vec2::new(-2.5, 2.5),
-                );
+                widgets::bold_label(ui, "CLV3000", 15.0, colors::TEXT_PRIMARY);
             });
 
             // 整条标题栏（除了右上角两个按钮）都能拖动窗口——包括图标和标题文字
@@ -630,7 +623,7 @@ fn resource_bar(ui: &mut egui::Ui, sample: ResourceSample) {
             ui.add_space(ui.available_width() / 2.0 - 160.0);
             resource_meter(ui, "CPU", sample.cpu_percent);
             ui.add_space(24.0);
-            resource_meter(ui, "内存", sample.mem_percent());
+            resource_meter(ui, "Memory", sample.mem_percent());
         });
     });
 }
@@ -669,9 +662,9 @@ fn dashboard_page(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut App) {
     let mut content_height = app.dashboard_content_height;
     widgets::vertically_centered(ui, &mut content_height, |ui| {
         let (color, title) = if has_threats {
-            (colors::RED, "系统状态：存在风险")
+            (colors::RED, "System Status: At Risk")
         } else {
-            (colors::GREEN, "系统状态：安全")
+            (colors::GREEN, "System Status: Secure")
         };
 
         // 画布比圆环本身大一圈，专门留给外面那层光晕，不然会被裁掉。
@@ -699,16 +692,16 @@ fn dashboard_page(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut App) {
         let sub = match &app.config.last_full_scan {
             Some(r) if r.threats_found == 0 => {
                 format!(
-                    "上次全盘扫描 · {} · 未发现威胁",
+                    "Last Full Scan · {} · No threats found",
                     r.time.display_relative_to(&today)
                 )
             }
             Some(r) => format!(
-                "上次全盘扫描 · {} · 发现 {} 个威胁",
+                "Last Full Scan · {} · {} threat(s) found",
                 r.time.display_relative_to(&today),
                 r.threats_found
             ),
-            None => "尚未进行过全盘扫描".to_string(),
+            None => "No full scan performed yet".to_string(),
         };
         ui.label(egui::RichText::new(sub).color(colors::TEXT_SECONDARY));
 
@@ -719,17 +712,17 @@ fn dashboard_page(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut App) {
         // 一样先量出这一行真正需要多宽，再用 `allocate_ui_with_layout` 居中。
         const BTN_GAP: f32 = 12.0;
         let row_width =
-            action_button_width(ui, "闪电扫描") + BTN_GAP + action_button_width(ui, "全盘扫描");
+            action_button_width(ui, "Quick Scan") + BTN_GAP + action_button_width(ui, "Full Scan");
         ui.allocate_ui_with_layout(
             Vec2::new(row_width, 42.0),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                if action_button(ui, "闪电扫描", |p, r, s| icons::bolt(p, r, s.color)) {
+                if action_button(ui, "Quick Scan", |p, r, s| icons::bolt(p, r, s.color)) {
                     app.navigate(ctx, Page::QuickScan);
                     app.quick.start(app.config.scan_removable_drives);
                 }
                 ui.add_space(BTN_GAP);
-                if action_button(ui, "全盘扫描", icons::database) {
+                if action_button(ui, "Full Scan", icons::database) {
                     app.navigate(ctx, Page::FullScan);
                     app.full.start(app.config.scan_removable_drives);
                 }
@@ -801,11 +794,10 @@ fn action_button_response(
     const H_PAD: f32 = ACTION_BTN_H_PAD;
     const V_PAD: f32 = ACTION_BTN_V_PAD;
 
-    let font_id = egui::FontId::proportional(14.0);
-    let galley = ui
-        .ctx()
-        .fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font_id, colors::TEXT_PRIMARY));
-    let text_size = galley.size();
+    let text_size = Vec2::new(
+        widgets::measure_text_width(ui, label, 14.0),
+        ui.text_style_height(&egui::TextStyle::Body),
+    );
 
     let desired = Vec2::new(
         H_PAD * 2.0 + ICON_SIZE + ICON_GAP + text_size.x,
@@ -827,20 +819,7 @@ fn action_button_response(
                     Stroke::new(1.6, colors::ACCENT_BLUE),
                 );
                 ui.add_space(ICON_GAP);
-                // 不用 ui.label(...)：它会用字体行高的默认包围盒去走 Align::Center，
-                // 中文字体的行高内部本身就不是墨迹对称的，交给自动布局就会看起来比
-                // 图标偏高偏右。这里手动量好文字尺寸、占位后，画的时候再手动往左下
-                // 微调一点——直接控制最终落墨位置，不用猜布局系统怎么算的。
-                //
-                // 注意：不能用 `ui.allocate_painter(...)`——它返回的画笔会把裁剪框
-                // 收紧到刚分配的这一小块矩形上，往左挪的那部分笔墨会直接被裁掉
-                // （这正是"文字左边被挡住"的原因）。改用 `allocate_exact_size` 只
-                // 占位置，画的时候用 `ui.painter()`（裁剪框是整个按钮/面板那么大，
-                // 不会卡到这几像素的偏移）。
-                let (text_rect, _) = ui.allocate_exact_size(text_size, egui::Sense::hover());
-                let painter = ui.painter();
-                let nudge = Vec2::new(-2.5, 2.5);
-                painter.galley(text_rect.min + nudge, galley.clone(), colors::TEXT_PRIMARY);
+                ui.label(egui::RichText::new(label).color(colors::TEXT_PRIMARY));
                 ui.add_space(H_PAD);
             },
         )
@@ -873,7 +852,7 @@ fn quick_scan_page(ui: &mut egui::Ui, app: &mut App) {
         &mut app.quick,
         &mut app.config,
         &mut app.toasts,
-        "闪电扫描",
+        "Quick Scan",
         colors::ACCENT_BLUE,
         |p, r, s| icons::bolt(p, r, s.color),
         true,
@@ -888,7 +867,7 @@ fn full_scan_page(ui: &mut egui::Ui, app: &mut App) {
         &mut app.full,
         &mut app.config,
         &mut app.toasts,
-        "全盘扫描",
+        "Full Scan",
         colors::ACCENT_BLUE,
         icons::hamburger,
         true,
@@ -961,11 +940,11 @@ fn scan_page(
                 icon(&painter, deco_glyph, Stroke::new(2.0, ring_color));
 
                 ui.add_space(14.0);
-                ui.label(egui::RichText::new(format!("准备{title}")).color(colors::TEXT_SECONDARY));
+                ui.label(egui::RichText::new(format!("Ready for {title}")).color(colors::TEXT_SECONDARY));
                 ui.add_space(16.0);
                 const START_BTN_SHIFT_LEFT: f32 = 2.0;
                 ui.horizontal(|ui| {
-                    let label = format!("开始{title}");
+                    let label = format!("Start {title}");
                     let btn_w = action_button_width(ui, &label);
                     let left = (ui.available_width() - btn_w) / 2.0 - START_BTN_SHIFT_LEFT;
                     ui.add_space(left.max(0.0));
@@ -984,19 +963,19 @@ fn scan_page(
                     220.0,
                     None,
                     ring_color,
-                    "枚举中",
-                    &format!("{done}/{total} 进程"),
+                    "Enumerating",
+                    &format!("{done}/{total} processes"),
                 );
                 ui.add_space(16.0);
                 widgets::centered_stat_pills(
                     ui,
                     &[
-                        (format!("{done} / {total}"), "进程"),
-                        (files_found.to_string(), "文件"),
+                        (format!("{done} / {total}"), "processes"),
+                        (files_found.to_string(), "files"),
                     ],
                 );
                 ui.add_space(10.0);
-                if ui.link("取消扫描").clicked() {
+                if ui.link("Cancel Scan").clicked() {
                     state.request_cancel();
                 }
             }
@@ -1015,7 +994,7 @@ fn scan_page(
                 let title_text = percent
                     .map(|p| format!("{:.0}%", p * 100.0))
                     .unwrap_or_else(|| format!("{scanned}"));
-                widgets::bold_label(ui, &format!("正在{title}"), 14.0, colors::TEXT_PRIMARY);
+                widgets::bold_label(ui, &format!("Running {title}"), 14.0, colors::TEXT_PRIMARY);
                 ui.add_space(6.0);
                 widgets::progress_ring(ui, 220.0, percent, ring_color, &title_text, "");
                 ui.add_space(4.0);
@@ -1026,15 +1005,15 @@ fn scan_page(
                 );
                 ui.add_space(16.0);
                 let first_pill = match total {
-                    Some(t) => (format!("{scanned} / {t}"), "文件"),
-                    None => (scanned.to_string(), "已扫描"),
+                    Some(t) => (format!("{scanned} / {t}"), "files"),
+                    None => (scanned.to_string(), "scanned"),
                 };
                 widgets::centered_stat_pills(
                     ui,
-                    &[first_pill, (state.threats.len().to_string(), "威胁")],
+                    &[first_pill, (state.threats.len().to_string(), "threats")],
                 );
                 ui.add_space(10.0);
-                if ui.link("取消扫描").clicked() {
+                if ui.link("Cancel Scan").clicked() {
                     state.request_cancel();
                 }
             }
@@ -1068,23 +1047,23 @@ fn scan_page(
                 }
                 ui.add_space(14.0);
                 let heading = if *cancelled {
-                    "扫描已取消".to_string()
+                    "Scan cancelled".to_string()
                 } else if has_threats {
-                    format!("发现 {} 个威胁", state.threats.len())
+                    format!("{} threat(s) found", state.threats.len())
                 } else {
-                    "未发现威胁".to_string()
+                    "No threats found".to_string()
                 };
                 widgets::bold_label(ui, &heading, 18.0, colors::TEXT_PRIMARY);
                 ui.label(
                     egui::RichText::new(format!(
-                        "{title} · 用时 {} · 已扫描 {scanned} 个文件",
+                        "{title} · Duration {} · {scanned} files scanned",
                         format_duration(*elapsed)
                     ))
                     .color(colors::TEXT_SECONDARY)
                     .small(),
                 );
                 ui.add_space(16.0);
-                if action_button(ui, &format!("重新{title}"), icon) {
+                if action_button(ui, &format!("Run {title} Again"), icon) {
                     state.start(config.scan_removable_drives);
                 }
             }
@@ -1107,7 +1086,7 @@ fn scan_page(
                     match action {
                         ThreatAction::Ignore => ignore_target = Some(i),
                         ThreatAction::Quarantine => {
-                            toasts.push(Toast::new("隔离功能将在后续版本中提供"));
+                            toasts.push(Toast::new("Quarantine will be available in a future release"));
                         }
                         ThreatAction::None => {}
                     }
@@ -1143,14 +1122,14 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
             Stroke::new(2.0, colors::ACCENT_BLUE),
         );
         ui.add_space(14.0);
-        widgets::bold_label(ui, "病毒库", 18.0, colors::TEXT_PRIMARY);
+        widgets::bold_label(ui, "Virus Database", 18.0, colors::TEXT_PRIMARY);
         ui.add_space(14.0);
 
         let available = paths::clamscan_available();
         let status = if available {
-            "内置病毒库已就绪"
+            "Built-in database ready"
         } else {
-            "未找到扫描引擎"
+            "Scan engine not found"
         };
         let detail_dir = if available {
             paths::clamav_database_dir()
@@ -1186,19 +1165,19 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
         // 分两行意义不大，合一行更紧凑。宽度量出来再居中，见 `action_button_width`
         // 的注释。
         let update_label = if app.virus_db.updating {
-            "正在更新…"
+            "Updating…"
         } else {
-            "手动更新病毒库"
+            "Update Database"
         };
         const BTN_GAP: f32 = 12.0;
-        let row_width = action_button_width(ui, "打开所在文件夹")
+        let row_width = action_button_width(ui, "Open Folder")
             + BTN_GAP
             + action_button_width(ui, update_label);
         ui.allocate_ui_with_layout(
             Vec2::new(row_width, 42.0),
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
-                if action_button(ui, "打开所在文件夹", icons::folder) {
+                if action_button(ui, "Open Folder", icons::folder) {
                     // 文件夹不一定存在（比如引擎没找到、数据库还没更新过一次）——
                     // 先确保目录存在再打开，不然系统文件管理器会直接报错。
                     paths::ensure_dir(&detail_dir);
@@ -1209,7 +1188,7 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
                 ui.add_space(BTN_GAP);
                 if action_button(ui, update_label, icons::database) && !app.virus_db.updating {
                     app.virus_db.start_update();
-                    app.toast("开始更新病毒库…");
+                    app.toast("Updating database…");
                 }
             },
         );
@@ -1233,15 +1212,17 @@ fn virus_db_about_column(ui: &mut egui::Ui, app: &mut App) {
         widgets::bold_label(ui, "CLV3000", 17.0, colors::TEXT_PRIMARY);
         ui.add_space(4.0);
         ui.label(
-            egui::RichText::new(format!("版本 {}", env!("CARGO_PKG_VERSION")))
+            egui::RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
                 .color(colors::TEXT_SECONDARY)
                 .small(),
         );
         ui.add_space(10.0);
         ui.label(
-            egui::RichText::new("极速、可靠、高效的病毒防护程序，适合各类老旧系统和电脑")
-                .color(colors::TEXT_MUTED)
-                .small(),
+            egui::RichText::new(
+                "Fast, reliable virus protection for older and resource-constrained PCs",
+            )
+            .color(colors::TEXT_MUTED)
+            .small(),
         );
     });
     app.virus_db.about_col_height = content_height;
@@ -1249,16 +1230,18 @@ fn virus_db_about_column(ui: &mut egui::Ui, app: &mut App) {
 
 fn about_window(ctx: &egui::Context, app: &mut App) {
     let mut open = app.about_open;
-    egui::Window::new("关于 CLV3000")
+    egui::Window::new("About CLV3000")
         .collapsible(false)
         .resizable(false)
         .open(&mut open)
         .show(ctx, |ui| {
             widgets::bold_label(ui, "CLV3000", 18.0, colors::TEXT_PRIMARY);
-            ui.label(format!("版本 {}", env!("CARGO_PKG_VERSION")));
+            ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
             ui.add_space(8.0);
             ui.label(
-                egui::RichText::new("极速、可靠、高效的病毒防护程序，适合各类老旧系统和电脑。")
+                egui::RichText::new(
+                    "Fast, reliable virus protection for older and resource-constrained PCs.",
+                )
                     .color(colors::TEXT_SECONDARY)
                     .small(),
             );
@@ -1280,8 +1263,8 @@ fn format_duration(d: Duration) -> String {
     let m = secs / 60;
     let s = secs % 60;
     if m > 0 {
-        format!("{m} 分 {s} 秒")
+        format!("{m}m {s}s")
     } else {
-        format!("{s} 秒")
+        format!("{s}s")
     }
 }

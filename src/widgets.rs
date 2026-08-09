@@ -348,7 +348,7 @@ pub fn threat_card(ui: &mut Ui, virus_name: &str, path: &str) -> ThreatAction {
                             .corner_radius(999.0)
                             .inner_margin(egui::Margin::symmetric(8, 2))
                             .show(ui, |ui| {
-                                ui.label(egui::RichText::new("高危").color(Color32::WHITE).small());
+                                ui.label(egui::RichText::new("High Risk").color(Color32::WHITE).small());
                             });
                     });
                     ui.label(
@@ -359,11 +359,11 @@ pub fn threat_card(ui: &mut Ui, virus_name: &str, path: &str) -> ThreatAction {
                 });
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if pill_button(ui, "忽略", false) {
+                    if pill_button(ui, "Ignore", false) {
                         action = ThreatAction::Ignore;
                     }
                     ui.add_space(8.0);
-                    if pill_button(ui, "隔离", true) {
+                    if pill_button(ui, "Quarantine", true) {
                         action = ThreatAction::Quarantine;
                     }
                 });

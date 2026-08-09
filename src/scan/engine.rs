@@ -43,7 +43,7 @@ mod real {
     pub fn run(path_rx: Receiver<PathBuf>, tx: Sender<ScanEvent>, cancel: CancelFlag) {
         if !paths::clamscan_available() {
             let _ = tx.send(ScanEvent::Error(format!(
-                "找不到扫描引擎：{}\n请确认 clamav 目录随程序一起分发。",
+                "Scan engine not found: {}\nMake sure the clamav directory is bundled with the app.",
                 paths::clamscan_path().display()
             )));
             let _ = tx.send(ScanEvent::Finished {
@@ -72,7 +72,7 @@ mod real {
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                let _ = tx.send(ScanEvent::Error(format!("启动扫描引擎失败：{e}")));
+                let _ = tx.send(ScanEvent::Error(format!("Failed to start scan engine: {e}")));
                 let _ = tx.send(ScanEvent::Finished {
                     scanned: 0,
                     elapsed: start.elapsed(),
@@ -85,7 +85,7 @@ mod real {
         let mut stdin = match child.stdin.take() {
             Some(s) => s,
             None => {
-                let _ = tx.send(ScanEvent::Error("无法写入扫描引擎输入流".to_string()));
+                let _ = tx.send(ScanEvent::Error("Failed to write to scan engine stdin".to_string()));
                 let _ = child.kill();
                 return;
             }
@@ -93,7 +93,7 @@ mod real {
         let stdout = match child.stdout.take() {
             Some(s) => s,
             None => {
-                let _ = tx.send(ScanEvent::Error("无法读取扫描引擎输出流".to_string()));
+                let _ = tx.send(ScanEvent::Error("Failed to read scan engine stdout".to_string()));
                 let _ = child.kill();
                 return;
             }
