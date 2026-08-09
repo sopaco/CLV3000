@@ -7,6 +7,20 @@ use egui::{Align2, Color32, FontId, Pos2, Response, Sense, Stroke, Ui, Vec2, epa
 /// 只有一个字重，没有 bold 变体可选）。这里手动把同一段文字描两遍、横向错开不到
 /// 1px，模拟笔画加粗的效果——不依赖额外的粗体字体文件，跨 Windows/macOS 都一样。
 pub fn bold_label(ui: &mut Ui, text: &str, size: f32, color: Color32) -> Response {
+    bold_label_nudged(ui, text, size, color, Vec2::ZERO)
+}
+
+/// 跟 `bold_label` 一样，但多一个手动微调的偏移量——用在"图标 + 文字"并排、
+/// 需要让文字的墨迹跟图标视觉对齐的地方。egui 用文字的行高包围盒去做自动居中，
+/// 中文字体的行高内部本身不是墨迹对称的，交给自动布局会看起来比图标偏高/偏右，
+/// 这里直接手动纠正最终落墨位置，不去跟布局系统的包围盒计算较劲。
+pub fn bold_label_nudged(
+    ui: &mut Ui,
+    text: &str,
+    size: f32,
+    color: Color32,
+    nudge: Vec2,
+) -> Response {
     const OFFSET: f32 = 0.6;
     let font_id = FontId::proportional(size);
     let galley = ui
@@ -15,8 +29,9 @@ pub fn bold_label(ui: &mut Ui, text: &str, size: f32, color: Color32) -> Respons
     let desired = galley.size() + Vec2::new(OFFSET, 0.0);
     let (rect, response) = ui.allocate_exact_size(desired, Sense::hover());
     let painter = ui.painter();
-    painter.galley(rect.min, galley.clone(), color);
-    painter.galley(rect.min + Vec2::new(OFFSET, 0.0), galley, color);
+    let pos = rect.min + nudge;
+    painter.galley(pos, galley.clone(), color);
+    painter.galley(pos + Vec2::new(OFFSET, 0.0), galley, color);
     response
 }
 

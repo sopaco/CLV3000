@@ -100,6 +100,10 @@ egui 的字体只加载了一个字重，没有 bold 变体文件；`.strong()` 
 
 `egui::Button` 之类的标准控件会看 `Visuals::interact_cursor` 这个全局样式自动换手型光标（本项目在 `theme::apply` 里设成了 `Some(CursorIcon::PointingHand)`），但我们自己拿 `ui.interact(rect, id, Sense::click())` 或 `ui.allocate_painter(size, Sense::click())` 手搓的按钮（`action_button`/`pill_button`/侧边栏图标/标题栏按钮）**不会**自动读这个全局设置——每一处都要显式 `.on_hover_cursor(egui::CursorIcon::PointingHand)`。新增自定义可点击元素时记得补这一句。
 
+### 坑 8：`FontTweak.y_offset_factor` 只挪墨迹，不挪布局包围盒——会破坏图标/文字对齐
+
+之前为了让中文和拉丁字体混排时基线好看一点，给 CJK fallback 字体加了 `y_offset_factor`。结果这个偏移只影响**画笔实际落墨的位置**，`egui::Align::Center` 用来计算居中的是**文字的布局包围盒**（`FontTweak` 文档原话："this is only a visual effect and does not affect the text layout"）——两者不是一回事。于是图标按包围盒正确居中了，文字的包围盒也居中了，但文字的墨迹在盒子里悄悄往下偏了几像素，肉眼看就是"图标和文字没对齐"。**结论：不要用 `FontTweak` 的偏移量去做"跟别的控件对齐"这件事，它解决不了这个问题，反而会制造新的错位。** 如果确实有 CJK/拉丁混排的基线问题要处理，去找视觉上更协调的字号/字体，而不是事后拿 offset 硬掰。
+
 ## 图标绘制约定（`src/icons.rs`）
 
 - 所有图标是手绘矢量（`egui::Shape` 基础图元），不依赖图标字体——保证跨平台渲染一致。

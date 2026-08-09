@@ -5,7 +5,7 @@
 //!
 //! 找不到任何候选字体时静默跳过，不影响程序启动（只是中文会显示成方框）。
 
-use egui::epaint::text::{FontInsert, FontPriority, FontTweak, InsertFontFamily};
+use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
 use egui::{Context, FontData, FontFamily};
 use std::path::PathBuf;
 
@@ -14,17 +14,14 @@ pub fn install_cjk_font(ctx: &Context) {
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
         };
-        // 中文字体的字面在 em 格子里通常比拉丁字体撑得更满/坐得更高，同一行混排时
-        // 中文和数字/英文的视觉中心容易看起来没对齐。这个 y_offset_factor 把中文
-        // 字形整体往下挪一点，尽量跟拉丁字体的基线对上——没法在这台机器上直接肉眼
-        // 调，是按经验给的保守值，如果实际看还有偏差可以再调这个数字（正数往下移）。
-        let tweak = FontTweak {
-            y_offset_factor: 0.08,
-            ..Default::default()
-        };
+        // 之前这里加过一个 y_offset_factor，想让中文字形跟拉丁字体的基线对得更好看。
+        // 结果这个偏移只影响"画笔实际落墨的位置"，不影响"布局用来算居中的包围盒"
+        // （FontTweak 文档里写得很清楚：only a visual effect, does not affect layout）
+        // ——于是变成了图标能在包围盒里居中对齐，但文字的墨迹本身在盒子里偏下，
+        // 看起来就是"图标和文字没对齐"。这是本末倒置，删掉，不做这个补偿。
         ctx.add_font(FontInsert {
             name: "cjk-fallback".to_owned(),
-            data: FontData::from_owned(bytes).tweak(tweak),
+            data: FontData::from_owned(bytes),
             families: vec![
                 InsertFontFamily {
                     family: FontFamily::Proportional,

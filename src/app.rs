@@ -492,12 +492,20 @@ fn title_bar(ui: &mut egui::Ui, ctx: &egui::Context, icon_texture: &egui::Textur
                         .fit_to_exact_size(Vec2::splat(22.0)),
                 );
                 ui.add_space(8.0);
-                widgets::bold_label(ui, "CLV3000", 15.0, colors::TEXT_PRIMARY);
+                widgets::bold_label_nudged(
+                    ui,
+                    "CLV3000",
+                    15.0,
+                    colors::TEXT_PRIMARY,
+                    Vec2::new(-1.0, 1.0),
+                );
             });
 
-            // 标题文字和右侧按钮之间的整段空白区域用来拖动窗口。
+            // 整条标题栏（除了右上角两个按钮）都能拖动窗口——包括图标和标题文字
+            // 那块区域。图标/文字本身只声明了 `Sense::hover()`，不感知拖拽，
+            // 所以叠在它们上面这个更大的拖拽区域不会跟点击/悬浮冲突。
             let drag_rect = egui::Rect::from_min_max(
-                egui::pos2(full_rect.left() + 140.0, full_rect.top()),
+                egui::pos2(full_rect.left(), full_rect.top()),
                 egui::pos2(min_rect.left() - btn_gap, full_rect.bottom()),
             );
             if drag_rect.width() > 0.0 {
@@ -737,7 +745,14 @@ fn action_button(
                     Stroke::new(1.6, colors::ACCENT_BLUE),
                 );
                 ui.add_space(ICON_GAP);
-                ui.label(egui::RichText::new(label).color(colors::TEXT_PRIMARY));
+                // 不用 ui.label(...)：它会用字体行高的默认包围盒去走 Align::Center，
+                // 中文字体的行高内部本身就不是墨迹对称的，交给自动布局就会看起来比
+                // 图标偏高偏右。这里手动量好文字尺寸、占位后，画的时候再手动往左下
+                // 微调一点——直接控制最终落墨位置，不用猜布局系统怎么算的。
+                let (text_resp, painter) =
+                    ui.allocate_painter(text_size, egui::Sense::hover());
+                let nudge = Vec2::new(-1.0, 1.0);
+                painter.galley(text_resp.rect.min + nudge, galley.clone(), colors::TEXT_PRIMARY);
                 ui.add_space(H_PAD);
             },
         )
