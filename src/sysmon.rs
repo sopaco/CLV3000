@@ -42,7 +42,7 @@ pub fn spawn() -> SysMonHandle {
     let stop_flag = Arc::clone(&stop);
 
     std::thread::spawn(move || {
-        let mut sys = System::new_all();
+        let mut sys = System::new();
         // sysinfo 要求两次 refresh_cpu_usage 之间至少间隔 MINIMUM_CPU_UPDATE_INTERVAL
         // 才能算出有意义的百分比，第一次先热身一下。
         sys.refresh_cpu_usage();

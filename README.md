@@ -18,7 +18,7 @@
 
 ---
 
-CLV3000 is a minimal, manual virus scanning tool designed for older or resource-constrained Windows machines. It does **not** provide real-time protection — instead it offers fast, on-demand scans powered by ClamAV with a clean native GUI.
+CLV3000 is a minimal, manual virus scanning tool designed for even older Windows machines. It does **not** provide real-time protection — instead it offers fast, on-demand scans powered by ClamAV with a clean native GUI.
 
 ## Features
 

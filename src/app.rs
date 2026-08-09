@@ -1,6 +1,7 @@
 //! 主界面：仪表盘 / 闪电扫描 / 病毒库 / 全盘扫描 四个页面 + 自绘标题栏 + 全局底部资源条。
 
 use crate::config::{AppConfig, ScanRecord};
+use crate::lifecycle::{Lifecycle, RunMode};
 use crate::localtime::Timestamp;
 use crate::paths;
 use crate::scan::{self, CancelFlag, ScanEvent, ScanKind, Threat};
@@ -11,14 +12,16 @@ use crate::widgets::{self, ThreatAction, Toast};
 use eframe::egui;
 use egui::{Color32, Stroke, Vec2, ViewportCommand};
 use muda::MenuEvent;
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 use tray_icon::TrayIconEvent;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Page {
+pub(crate) enum Page {
     Dashboard,
     QuickScan,
     VirusDb,
@@ -251,119 +254,31 @@ fn run_freshclam() -> Result<(), String> {
     Ok(())
 }
 
-pub struct App {
+/// 跨「窗口会话」保留的业务状态（配置、扫描、页面路由）。纯托盘模式下也存在。
+pub struct AppCore {
     page: Page,
     config: AppConfig,
     quick: ScanPageState,
     full: ScanPageState,
     virus_db: VirusDbState,
-    sysmon: SysMonHandle,
-    last_sample: ResourceSample,
-    toasts: Vec<Toast>,
-    about_open: bool,
-    allow_exit: bool,
-    tray: Option<Tray>,
-    /// 完整品牌图标的纹理（`icon_app.png`），"关于"区块用它显示 logo。
-    app_icon_texture: egui::TextureHandle,
-    /// 简化版图标的纹理（`icon_tray.png`），自绘标题栏左上角那个小图标用它
-    /// （Windows 用系统标题栏，不加载）。
-    #[cfg(not(windows))]
-    titlebar_icon_texture: egui::TextureHandle,
-    /// 概览页上一帧内容高度，给 `widgets::vertically_centered` 用。
     dashboard_content_height: f32,
 }
 
-/// 把 `icon_data::load_*_icon` 解出来的 `(rgba, w, h)` 传进 egui 的纹理系统，
-/// 拿到一个能在 `egui::Image` 里直接用的 `TextureHandle`。
-fn load_texture(
-    ctx: &egui::Context,
-    name: &str,
-    (rgba, w, h): (Vec<u8>, u32, u32),
-) -> egui::TextureHandle {
-    let color_image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
-    ctx.load_texture(name, color_image, egui::TextureOptions::LINEAR)
-}
-
-impl App {
-    pub fn new(_cc: &eframe::CreationContext<'_>, tray: Option<Tray>) -> Self {
-        theme::apply(&_cc.egui_ctx);
-
-        let app_icon_texture = load_texture(
-            &_cc.egui_ctx,
-            "app_icon",
-            crate::icon_data::load_app_icon(160),
-        );
-        #[cfg(not(windows))]
-        let titlebar_icon_texture = load_texture(
-            &_cc.egui_ctx,
-            "titlebar_icon",
-            crate::icon_data::load_tray_icon(64),
-        );
-
+impl AppCore {
+    pub fn new() -> Self {
         Self {
             page: Page::Dashboard,
             config: AppConfig::load(),
             quick: ScanPageState::new(ScanKind::Quick),
             full: ScanPageState::new(ScanKind::Full),
             virus_db: VirusDbState::new(),
-            sysmon: sysmon::spawn(),
-            last_sample: ResourceSample::default(),
-            toasts: Vec::new(),
-            about_open: false,
-            allow_exit: false,
-            tray,
-            app_icon_texture,
-            #[cfg(not(windows))]
-            titlebar_icon_texture,
             dashboard_content_height: 0.0,
         }
     }
 
-    fn toast(&mut self, text: impl Into<String>) {
-        self.toasts.push(Toast::new(text));
-    }
-
-    fn navigate(&mut self, ctx: &egui::Context, page: Page) {
-        self.page = page;
-        ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(ViewportCommand::Focus);
-    }
-
-    fn poll_tray(&mut self, ctx: &egui::Context) {
-        let Some(tray) = &self.tray else { return };
-
-        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            if let TrayIconEvent::DoubleClick { .. } = event {
-                ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
-                ctx.send_viewport_cmd(ViewportCommand::Focus);
-            }
-        }
-
-        while let Ok(event) = MenuEvent::receiver().try_recv() {
-            let id = event.id();
-            if id == &tray.ids.show {
-                ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
-                ctx.send_viewport_cmd(ViewportCommand::Focus);
-            } else if id == &tray.ids.quick_scan {
-                ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
-                ctx.send_viewport_cmd(ViewportCommand::Focus);
-                self.page = Page::QuickScan;
-                self.quick.start(self.config.scan_removable_drives);
-            } else if id == &tray.ids.about {
-                ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(ViewportCommand::Focus);
-                self.about_open = true;
-            } else if id == &tray.ids.quit {
-                self.allow_exit = true;
-                ctx.send_viewport_cmd(ViewportCommand::Close);
-            }
-        }
-    }
-
-    fn poll_scans(&mut self) {
+    /// 轮询扫描/病毒库后台线程；返回需要弹 Toast 的消息（仅窗口会话消费）。
+    pub fn poll_background(&mut self) -> Vec<String> {
+        let mut toasts = Vec::new();
         if let Some((scanned, elapsed, cancelled)) = self.quick.poll(&self.config) {
             if !cancelled {
                 self.config.last_quick_scan = Some(ScanRecord {
@@ -388,39 +303,221 @@ impl App {
         }
         if let Some(result) = self.virus_db.poll() {
             match result {
-                Ok(()) => self.toast("Database update complete"),
-                Err(e) => self.toast(format!("Database update failed: {e}")),
+                Ok(()) => toasts.push("Database update complete".to_string()),
+                Err(e) => toasts.push(format!("Database update failed: {e}")),
             }
+        }
+        toasts
+    }
+}
+
+/// 托盘/菜单事件：窗口与纯托盘循环共用。
+pub fn poll_tray_events(tray: &Tray, core: &mut AppCore, lifecycle: &mut Lifecycle) {
+    while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+        if let TrayIconEvent::DoubleClick { .. } = event {
+            lifecycle.mode = RunMode::ShowWindow;
+        }
+    }
+
+    while let Ok(event) = MenuEvent::receiver().try_recv() {
+        let id = event.id();
+        if id == &tray.ids.show {
+            lifecycle.mode = RunMode::ShowWindow;
+        } else if id == &tray.ids.quick_scan {
+            lifecycle.mode = RunMode::ShowWindow;
+            core.page = Page::QuickScan;
+            core.quick.start(core.config.scan_removable_drives);
+        } else if id == &tray.ids.about {
+            lifecycle.resume_after_about = Some(lifecycle.mode);
+            lifecycle.mode = RunMode::AboutOnly;
+        } else if id == &tray.ids.quit {
+            lifecycle.mode = RunMode::Quit;
+        }
+    }
+}
+
+pub struct App {
+    core: Rc<RefCell<AppCore>>,
+    lifecycle: Rc<RefCell<Lifecycle>>,
+    /// 从 `main` 借入，Drop 时归还，供下一次 eframe 会话复用。
+    tray_slot: Rc<RefCell<Option<Tray>>>,
+    tray: Option<Tray>,
+    sysmon: Option<SysMonHandle>,
+    last_sample: ResourceSample,
+    toasts: Vec<Toast>,
+    allow_exit: bool,
+    /// 完整品牌图标的纹理（`icon_app.png`），"关于"区块用它显示 logo。
+    app_icon_texture: Option<egui::TextureHandle>,
+    /// 简化版图标的纹理（`icon_tray.png`），自绘标题栏左上角那个小图标用它
+    /// （Windows 用系统标题栏，不加载）。
+    #[cfg(not(windows))]
+    titlebar_icon_texture: Option<egui::TextureHandle>,
+}
+
+/// 把 `icon_data::load_*_icon` 解出来的 `(rgba, w, h)` 传进 egui 的纹理系统，
+/// 拿到一个能在 `egui::Image` 里直接用的 `TextureHandle`。
+fn load_texture(
+    ctx: &egui::Context,
+    name: &str,
+    (rgba, w, h): (Vec<u8>, u32, u32),
+) -> egui::TextureHandle {
+    let color_image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+    ctx.load_texture(name, color_image, egui::TextureOptions::LINEAR)
+}
+
+impl App {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        core: Rc<RefCell<AppCore>>,
+        lifecycle: Rc<RefCell<Lifecycle>>,
+        tray_slot: Rc<RefCell<Option<Tray>>>,
+    ) -> Self {
+        theme::apply(&cc.egui_ctx);
+
+        let tray = tray_slot.borrow_mut().take();
+
+        Self {
+            core,
+            lifecycle,
+            tray_slot,
+            tray,
+            sysmon: None,
+            last_sample: ResourceSample::default(),
+            toasts: Vec::new(),
+            allow_exit: false,
+            app_icon_texture: None,
+            #[cfg(not(windows))]
+            titlebar_icon_texture: None,
+        }
+    }
+
+    fn toast(&mut self, text: impl Into<String>) {
+        self.toasts.push(Toast::new(text));
+    }
+
+    fn navigate(&mut self, page: Page) {
+        self.core.borrow_mut().page = page;
+    }
+
+    fn tray(&self) -> Option<&Tray> {
+        self.tray.as_ref()
+    }
+
+    fn ensure_ui_resources(&mut self, ctx: &egui::Context) {
+        if self.sysmon.is_none() {
+            self.sysmon = Some(sysmon::spawn());
+        }
+        if self.app_icon_texture.is_none() {
+            self.app_icon_texture = Some(load_texture(
+                ctx,
+                "app_icon",
+                crate::icon_data::load_app_icon(160),
+            ));
+        }
+        #[cfg(not(windows))]
+        if self.titlebar_icon_texture.is_none() {
+            self.titlebar_icon_texture = Some(load_texture(
+                ctx,
+                "titlebar_icon",
+                crate::icon_data::load_tray_icon(64),
+            ));
+        }
+    }
+
+    /// 释放 GPU 纹理与资源监控，为纯托盘模式腾出内存。
+    fn release_ui_resources(&mut self, ctx: &egui::Context) {
+        self.sysmon.take();
+        // 纹理句柄 drop 即可；随后 eframe 会话结束会释放 OpenGL 资源。
+        let _ = ctx;
+        self.app_icon_texture.take();
+        #[cfg(not(windows))]
+        self.titlebar_icon_texture.take();
+        self.toasts.clear();
+        self.last_sample = ResourceSample::default();
+    }
+
+    fn hide_to_tray(&mut self, ctx: &egui::Context) {
+        self.release_ui_resources(ctx);
+        self.lifecycle.borrow_mut().mode = RunMode::TrayOnly;
+        self.allow_exit = true;
+        ctx.send_viewport_cmd(ViewportCommand::Close);
+    }
+
+    fn poll_tray(&mut self, ctx: &egui::Context) {
+        let Some(tray) = self.tray() else { return };
+
+        // 先在局部作用域里轮询托盘事件并取出下一模式，再 drop 所有 RefCell 借用。
+        // `send_viewport_cmd(Close)` 可能同步重入 `logic()`，若仍持有 `borrow_mut` 会 panic。
+        let next_mode = {
+            let mut core = self.core.borrow_mut();
+            let mut lifecycle = self.lifecycle.borrow_mut();
+            poll_tray_events(tray, &mut core, &mut lifecycle);
+            lifecycle.mode
+        };
+
+        match next_mode {
+            RunMode::Quit => {
+                self.allow_exit = true;
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
+            RunMode::AboutOnly => {
+                self.release_ui_resources(ctx);
+                self.allow_exit = true;
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
+            _ => {}
+        }
+    }
+
+    fn poll_background(&mut self) {
+        let toasts = self.core.borrow_mut().poll_background();
+        for msg in toasts {
+            self.toast(msg);
+        }
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        if let Some(tray) = self.tray.take() {
+            *self.tray_slot.borrow_mut() = Some(tray);
         }
     }
 }
 
 impl eframe::App for App {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_tray(ctx);
+        self.poll_background();
+
+        if let Some(sysmon) = &self.sysmon
+            && let Ok(sample) = sysmon.rx.try_recv()
+        {
+            self.last_sample = sample;
+        }
+
+        let visible = ctx.input(|i| i.viewport().visible().unwrap_or(true));
+        let interval = if visible { 250 } else { 1000 };
+        ctx.request_repaint_after(Duration::from_millis(interval));
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // egui 0.36 把 SidePanel/TopBottomPanel/CentralPanel 都统一成了直接消费传入
-        // `ui` 剩余空间的容器，不再像旧版本那样单独走 `ctx.show(...)`。这里先拿一份
-        // `Context` 的 clone（内部是 Arc，克隆很便宜），后面凡是需要 `&Context` 的地方
-        // （viewport 命令、input 查询）都用它，`ui` 则专门用来摆放各个面板。
         let ctx = ui.ctx().clone();
+        self.ensure_ui_resources(&ctx);
 
         // 关闭按钮默认改成"最小化到托盘"，只有托盘菜单里的"退出"才真正关程序。
         if ctx.input(|i| i.viewport().close_requested()) && !self.allow_exit {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+            self.hide_to_tray(&ctx);
+            return;
         }
 
-        self.poll_tray(&ctx);
-        self.poll_scans();
-        if let Ok(sample) = self.sysmon.rx.try_recv() {
-            self.last_sample = sample;
-        }
         self.toasts.retain(|t| !t.expired());
 
-        // 保持轮询节奏，这样即使窗口被隐藏到托盘，托盘点击也能在不太离谱的延迟内被处理到。
-        ctx.request_repaint_after(Duration::from_millis(250));
-
         #[cfg(not(windows))]
-        title_bar(ui, &ctx, &self.titlebar_icon_texture);
+        if let Some(tex) = self.titlebar_icon_texture.clone() {
+            title_bar(ui, &ctx, &tex, self);
+        }
 
         egui::Panel::bottom("resource_bar")
             .exact_size(50.0)
@@ -447,17 +544,14 @@ impl eframe::App for App {
             .frame(egui::Frame::default().fill(colors::BG_APP))
             .show(ui, |ui| {
                 theme::paint_dotted_background(ui.painter(), ui.max_rect());
-                match self.page {
+                let page = self.core.borrow().page;
+                match page {
                     Page::Dashboard => dashboard_page(ui, &ctx, self),
                     Page::QuickScan => quick_scan_page(ui, self),
                     Page::VirusDb => virus_db_page(ui, self),
                     Page::FullScan => full_scan_page(ui, self),
                 }
             });
-
-        if self.about_open {
-            about_window(&ctx, self);
-        }
 
         widgets::show_toasts(&ctx, &self.toasts);
     }
@@ -467,7 +561,12 @@ impl eframe::App for App {
 const TITLE_BAR_HEIGHT: f32 = 44.0;
 
 #[cfg(not(windows))]
-fn title_bar(ui: &mut egui::Ui, ctx: &egui::Context, icon_texture: &egui::TextureHandle) {
+fn title_bar(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    icon_texture: &egui::TextureHandle,
+    app: &mut App,
+) {
     egui::Panel::top("title_bar")
         .exact_size(TITLE_BAR_HEIGHT)
         .resizable(false)
@@ -499,7 +598,7 @@ fn title_bar(ui: &mut egui::Ui, ctx: &egui::Context, icon_texture: &egui::Textur
             if title_bar_button(ui, close_rect, "close", |painter, rect| {
                 icons::close(painter, rect, Stroke::new(1.4, colors::TEXT_SECONDARY));
             }) {
-                ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+                app.hide_to_tray(ctx);
             }
             if title_bar_button(ui, min_rect, "minimize", |painter, rect| {
                 icons::minimize(painter, rect, Stroke::new(1.4, colors::TEXT_SECONDARY));
@@ -570,7 +669,7 @@ struct SidebarItem {
     draw: fn(&egui::Painter, egui::Rect, Stroke),
 }
 
-fn sidebar(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut App) {
+fn sidebar(ui: &mut egui::Ui, _ctx: &egui::Context, app: &mut App) {
     ui.add_space(18.0);
     let items = [
         SidebarItem {
@@ -592,7 +691,7 @@ fn sidebar(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut App) {
     ];
 
     for item in items {
-        let active = app.page == item.page;
+        let active = app.core.borrow().page == item.page;
         ui.vertical_centered(|ui| {
             let size = Vec2::splat(40.0);
             let (response, painter) = ui.allocate_painter(size, egui::Sense::click());
@@ -610,7 +709,7 @@ fn sidebar(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut App) {
             let glyph_rect = response.rect.shrink(9.5);
             (item.draw)(&painter, glyph_rect, Stroke::new(1.6, color));
             if response.clicked() {
-                app.navigate(ctx, item.page);
+                app.navigate(item.page);
             }
         });
         ui.add_space(14.0);
@@ -642,24 +741,24 @@ fn resource_meter(ui: &mut egui::Ui, label: &str, percent: f32) {
     ui.label(egui::RichText::new(format!("{percent:.0}%")).color(colors::TEXT_PRIMARY));
 }
 
-fn dashboard_page(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut App) {
+fn dashboard_page(ui: &mut egui::Ui, _ctx: &egui::Context, app: &mut App) {
     let today = Timestamp::now();
-    let has_threats = app
+    let core = app.core.borrow();
+    let has_threats = core
         .config
         .last_full_scan
         .as_ref()
         .map(|r| r.threats_found > 0)
         .unwrap_or(false)
-        || app
+        || core
             .config
             .last_quick_scan
             .as_ref()
             .map(|r| r.threats_found > 0)
             .unwrap_or(false);
+    drop(core);
 
-    // 闭包里要用 `app`（navigate/quick.start/...），不能再把 `app.dashboard_content_height`
-    // 直接借给 `vertically_centered`（借用冲突）——先取出来，用完再存回去。
-    let mut content_height = app.dashboard_content_height;
+    let mut content_height = app.core.borrow().dashboard_content_height;
     widgets::vertically_centered(ui, &mut content_height, |ui| {
         let (color, title) = if has_threats {
             (colors::RED, "System Status: At Risk")
@@ -689,27 +788,26 @@ fn dashboard_page(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut App) {
         ui.add_space(20.0);
         widgets::bold_label(ui, title, 20.0, colors::TEXT_PRIMARY);
         ui.add_space(6.0);
-        let sub = match &app.config.last_full_scan {
-            Some(r) if r.threats_found == 0 => {
-                format!(
-                    "Last Full Scan · {} · No threats found",
-                    r.time.display_relative_to(&today)
-                )
+        let sub = {
+            let core = app.core.borrow();
+            match &core.config.last_full_scan {
+                Some(r) if r.threats_found == 0 => {
+                    format!(
+                        "Last Full Scan · {} · No threats found",
+                        r.time.display_relative_to(&today)
+                    )
+                }
+                Some(r) => format!(
+                    "Last Full Scan · {} · {} threat(s) found",
+                    r.time.display_relative_to(&today),
+                    r.threats_found
+                ),
+                None => "No full scan performed yet".to_string(),
             }
-            Some(r) => format!(
-                "Last Full Scan · {} · {} threat(s) found",
-                r.time.display_relative_to(&today),
-                r.threats_found
-            ),
-            None => "No full scan performed yet".to_string(),
         };
         ui.label(egui::RichText::new(sub).color(colors::TEXT_SECONDARY));
 
         ui.add_space(28.0);
-        // 之前这里拍了个固定的"半宽 160"去居中这两个按钮，字体/字号一变（比如这轮
-        // CJK 字体缩放）按钮实际宽度就跟着变，160 不再准，两个按钮就会整体偏左，
-        // 跟上面圆环/文字的居中轴线对不上。改成跟 `widgets::centered_stat_pills`
-        // 一样先量出这一行真正需要多宽，再用 `allocate_ui_with_layout` 居中。
         const BTN_GAP: f32 = 12.0;
         let row_width =
             action_button_width(ui, "Quick Scan") + BTN_GAP + action_button_width(ui, "Full Scan");
@@ -718,18 +816,20 @@ fn dashboard_page(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut App) {
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 if action_button(ui, "Quick Scan", |p, r, s| icons::bolt(p, r, s.color)) {
-                    app.navigate(ctx, Page::QuickScan);
-                    app.quick.start(app.config.scan_removable_drives);
+                    let removable = app.core.borrow().config.scan_removable_drives;
+                    app.navigate(Page::QuickScan);
+                    app.core.borrow_mut().quick.start(removable);
                 }
                 ui.add_space(BTN_GAP);
                 if action_button(ui, "Full Scan", icons::database) {
-                    app.navigate(ctx, Page::FullScan);
-                    app.full.start(app.config.scan_removable_drives);
+                    let removable = app.core.borrow().config.scan_removable_drives;
+                    app.navigate(Page::FullScan);
+                    app.core.borrow_mut().full.start(removable);
                 }
             },
         );
     });
-    app.dashboard_content_height = content_height;
+    app.core.borrow_mut().dashboard_content_height = content_height;
 }
 
 const ACTION_BTN_ICON_SIZE: f32 = 21.0; // 原本 18，整体图标 +15% 的一部分
@@ -847,10 +947,12 @@ fn action_button_response(
 }
 
 fn quick_scan_page(ui: &mut egui::Ui, app: &mut App) {
+    let mut core = app.core.borrow_mut();
+    let AppCore { quick, config, .. } = &mut *core;
     scan_page(
         ui,
-        &mut app.quick,
-        &mut app.config,
+        quick,
+        config,
         &mut app.toasts,
         "Quick Scan",
         colors::ACCENT_BLUE,
@@ -860,12 +962,12 @@ fn quick_scan_page(ui: &mut egui::Ui, app: &mut App) {
 }
 
 fn full_scan_page(ui: &mut egui::Ui, app: &mut App) {
-    // 按需求去掉了"包含可移动磁盘"设置项，全盘扫描默认只扫固定磁盘
-    // （`config.scan_removable_drives` 字段还留着，默认 false，只是不再从 UI 暴露）。
+    let mut core = app.core.borrow_mut();
+    let AppCore { full, config, .. } = &mut *core;
     scan_page(
         ui,
-        &mut app.full,
-        &mut app.config,
+        full,
+        config,
         &mut app.toasts,
         "Full Scan",
         colors::ACCENT_BLUE,
@@ -940,7 +1042,9 @@ fn scan_page(
                 icon(&painter, deco_glyph, Stroke::new(2.0, ring_color));
 
                 ui.add_space(14.0);
-                ui.label(egui::RichText::new(format!("Ready for {title}")).color(colors::TEXT_SECONDARY));
+                ui.label(
+                    egui::RichText::new(format!("Ready for {title}")).color(colors::TEXT_SECONDARY),
+                );
                 ui.add_space(16.0);
                 const START_BTN_SHIFT_LEFT: f32 = 2.0;
                 ui.horizontal(|ui| {
@@ -1086,7 +1190,9 @@ fn scan_page(
                     match action {
                         ThreatAction::Ignore => ignore_target = Some(i),
                         ThreatAction::Quarantine => {
-                            toasts.push(Toast::new("Quarantine will be available in a future release"));
+                            toasts.push(Toast::new(
+                                "Quarantine will be available in a future release",
+                            ));
                         }
                         ThreatAction::None => {}
                     }
@@ -1112,8 +1218,9 @@ fn virus_db_page(ui: &mut egui::Ui, app: &mut App) {
 
 /// 左栏：病毒库状态 + 手动更新交互。
 fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
-    // 同 dashboard_page/scan_page 的居中写法，见 `widgets::vertically_centered`。
-    let mut content_height = app.virus_db.status_col_height;
+    let mut core = app.core.borrow_mut();
+    let mut content_height = core.virus_db.status_col_height;
+    let mut pending_toast: Option<String> = None;
     widgets::vertically_centered(ui, &mut content_height, |ui| {
         let (response, painter) = ui.allocate_painter(Vec2::splat(96.0), egui::Sense::hover());
         icons::database(
@@ -1164,7 +1271,7 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
         // "打开所在文件夹"和"手动更新病毒库"放同一行——都是这一栏里的辅助操作，
         // 分两行意义不大，合一行更紧凑。宽度量出来再居中，见 `action_button_width`
         // 的注释。
-        let update_label = if app.virus_db.updating {
+        let update_label = if core.virus_db.updating {
             "Updating…"
         } else {
             "Update Database"
@@ -1182,32 +1289,37 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
                     // 先确保目录存在再打开，不然系统文件管理器会直接报错。
                     paths::ensure_dir(&detail_dir);
                     if let Err(e) = paths::open_in_file_explorer(&detail_dir) {
-                        app.toast(e);
+                        pending_toast = Some(e);
                     }
                 }
                 ui.add_space(BTN_GAP);
-                if action_button(ui, update_label, icons::database) && !app.virus_db.updating {
-                    app.virus_db.start_update();
-                    app.toast("Updating database…");
+                if action_button(ui, update_label, icons::database) && !core.virus_db.updating {
+                    core.virus_db.start_update();
+                    pending_toast = Some("Updating database…".to_string());
                 }
             },
         );
     });
-    app.virus_db.status_col_height = content_height;
+    core.virus_db.status_col_height = content_height;
+    drop(core);
+    if let Some(msg) = pending_toast {
+        app.toast(msg);
+    }
 }
 
 /// 右栏：关于（真实品牌图标 + 名称 + 版本 + 简介）。
 fn virus_db_about_column(ui: &mut egui::Ui, app: &mut App) {
-    let mut content_height = app.virus_db.about_col_height;
+    let mut core = app.core.borrow_mut();
+    let mut content_height = core.virus_db.about_col_height;
     widgets::vertically_centered(ui, &mut content_height, |ui| {
-        // 用真实美术图标（贴图），跟左栏功能性 UI 的矢量图标风格特意区分开——
-        // 这里是想展示"这是什么产品"，用实际品牌图标比扁平线框图标更合适。
-        let logo_size = 90.0; // 原本 72，+25%
-        ui.add(
-            egui::Image::new((app.app_icon_texture.id(), app.app_icon_texture.size_vec2()))
-                .fit_to_exact_size(Vec2::splat(logo_size))
-                .corner_radius(16.0),
-        );
+        let logo_size = 90.0;
+        if let Some(tex) = &app.app_icon_texture {
+            ui.add(
+                egui::Image::new((tex.id(), tex.size_vec2()))
+                    .fit_to_exact_size(Vec2::splat(logo_size))
+                    .corner_radius(16.0),
+            );
+        }
         ui.add_space(12.0);
         widgets::bold_label(ui, "CLV3000", 17.0, colors::TEXT_PRIMARY);
         ui.add_space(4.0);
@@ -1218,35 +1330,12 @@ fn virus_db_about_column(ui: &mut egui::Ui, app: &mut App) {
         );
         ui.add_space(10.0);
         ui.label(
-            egui::RichText::new(
-                "Fast, reliable virus protection for older and resource-constrained PCs",
-            )
-            .color(colors::TEXT_MUTED)
-            .small(),
+            egui::RichText::new("Fast, reliable virus protection for even older PCs")
+                .color(colors::TEXT_MUTED)
+                .small(),
         );
     });
-    app.virus_db.about_col_height = content_height;
-}
-
-fn about_window(ctx: &egui::Context, app: &mut App) {
-    let mut open = app.about_open;
-    egui::Window::new("About CLV3000")
-        .collapsible(false)
-        .resizable(false)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            widgets::bold_label(ui, "CLV3000", 18.0, colors::TEXT_PRIMARY);
-            ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
-            ui.add_space(8.0);
-            ui.label(
-                egui::RichText::new(
-                    "Fast, reliable virus protection for older and resource-constrained PCs.",
-                )
-                    .color(colors::TEXT_SECONDARY)
-                    .small(),
-            );
-        });
-    app.about_open = open;
+    core.virus_db.about_col_height = content_height;
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {
