@@ -432,10 +432,11 @@ impl App {
             self.sysmon = Some(sysmon::spawn());
         }
         if self.app_icon_texture.is_none() {
+            const LOGO_DISPLAY_PT: f32 = 90.0;
             self.app_icon_texture = Some(load_texture(
                 ctx,
                 "app_icon",
-                crate::icon_data::load_app_icon(160),
+                crate::icon_data::load_app_icon_for_display(LOGO_DISPLAY_PT, ctx.pixels_per_point()),
             ));
         }
         #[cfg(not(windows))]
@@ -1371,11 +1372,11 @@ fn virus_db_about_column(ui: &mut egui::Ui, app: &mut App) {
     let mut core = app.core.borrow_mut();
     let mut content_height = core.virus_db.about_col_height;
     widgets::vertically_centered(ui, &mut content_height, |ui| {
-        let logo_size = 90.0;
+        const LOGO_DISPLAY_PT: f32 = 90.0;
         if let Some(tex) = &app.app_icon_texture {
             ui.add(
                 egui::Image::new((tex.id(), tex.size_vec2()))
-                    .fit_to_exact_size(Vec2::splat(logo_size))
+                    .fit_to_exact_size(Vec2::splat(LOGO_DISPLAY_PT))
                     .corner_radius(16.0),
             );
         }

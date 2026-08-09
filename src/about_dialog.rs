@@ -8,11 +8,14 @@ use eframe::egui;
 use egui::{TextureHandle, Vec2, ViewportCommand};
 
 const LOGO_TEX_ID: &str = "clv3000_about_logo";
+/// 关于弹窗 logo 的 UI 逻辑尺寸（pt）。
+const LOGO_DISPLAY_PT: f32 = 88.0;
 
 /// 阻塞直到用户关闭关于窗。
 pub fn show_standalone() {
     let info = ClamAvInfo::gather();
-    let icon = icon_data::load_app_icon(64);
+    // 窗口图标在 eframe 启动前设置，拿不到 pixels_per_point，用 128 覆盖常见 2x 屏。
+    let icon = icon_data::load_app_icon(128);
     let window_icon = egui::IconData {
         rgba: icon.0.clone(),
         width: icon.1,
@@ -101,7 +104,8 @@ impl eframe::App for AboutDialog {
 }
 
 fn load_logo_texture(ctx: &egui::Context) -> TextureHandle {
-    let (rgba, w, h) = icon_data::load_app_icon(120);
+    let (rgba, w, h) =
+        icon_data::load_app_icon_for_display(LOGO_DISPLAY_PT, ctx.pixels_per_point());
     let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
     ctx.load_texture(LOGO_TEX_ID, image, egui::TextureOptions::LINEAR)
 }
@@ -111,7 +115,7 @@ fn paint_about_body(ui: &mut egui::Ui, logo: &TextureHandle, info: &ClamAvInfo) 
         ui.add_space(8.0);
         ui.add(
             egui::Image::new((logo.id(), logo.size_vec2()))
-                .fit_to_exact_size(Vec2::splat(88.0))
+                .fit_to_exact_size(Vec2::splat(LOGO_DISPLAY_PT))
                 .corner_radius(14.0),
         );
         ui.add_space(10.0);
