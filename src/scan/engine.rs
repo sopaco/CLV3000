@@ -87,10 +87,12 @@ mod real {
                 "--database={}",
                 paths::clamav_database_dir().display()
             ))
-            // ── 扫描速度优化 ──
-            // 目标文件都是 PE 可执行文件（exe/dll/sys 等），关闭所有无关的文件类型扫描，
-            // 减少每个文件的扫描时间。DB 加载的 10~30 秒固定开销无法在此消除，
-            // 但单文件扫描时间可显著降低。
+            // ── 扫描速度优化（关键）──
+            // 目标文件都是 PE 可执行文件（exe/dll/sys 等）。ClamAV 默认开启的 bytecode
+            // 签名会对每个可疑 PE 做 JIT 编译 + 模拟执行解包，单文件能跑到 2~5 秒，
+            // 是慢扫的主因。关闭后单文件通常回落到 100~300ms，代价是丢失 bytecode
+            // 签名检测能力（对常见 PE 检出影响有限，可接受）。
+            // DB 加载的 10~30 秒固定开销无法在此消除，但单文件扫描时间可显著降低。
             // 保留：--scan-pe（核心需求）、--scan-ole2（部分 PE 内嵌 OLE 容器）。
             .arg("--scan-elf=no")        // 不扫 ELF（Linux 可执行文件）
             .arg("--scan-archive=no")    // 不扫压缩包（目标是独立 exe/dll，非自解压包）
@@ -105,11 +107,13 @@ mod real {
             .arg("--scan-image-fuzzy-hash=no") // 不做图片模糊哈希
             .arg("--phishing-sigs=no")   // 不做钓鱼签名检测（针对邮件）
             .arg("--phishing-scan-urls=no")    // 不做 URL 钓鱼检测
+            // ── 单文件耗时杀手：bytecode + PUA ──
+            .arg("--bytecode=no")        // 关闭字节码签名（JIT 编译+模拟执行，单文件最多 5s）
+            .arg("--detect-pua=no")      // 不检测"潜在不需要的应用"，省一遍 PUA 签名匹配
             // 大小与超时限制：跳过过大的文件、限制单文件扫描时间。
             .arg("--max-filesize=100M")       // 超过 100MB 的文件跳过（视为干净）
             .arg("--max-scansize=200M")       // 容器文件最大扫描数据量
-            .arg("--max-scantime=10000")      // 单文件超 10 秒视为干净
-            .arg("--bytecode-timeout=5000")   // 字节码签名超时 5 秒
+            .arg("--max-scantime=5000")       // 单文件超 2 秒视为干净（原 10s 太宽松）
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .creation_flags(CREATE_NO_WINDOW);
