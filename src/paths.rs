@@ -71,3 +71,30 @@ pub fn config_file_path() -> PathBuf {
 pub fn ensure_dir(dir: &Path) {
     let _ = std::fs::create_dir_all(dir);
 }
+
+/// 用系统文件管理器打开一个目录——病毒库页"打开所在文件夹"按钮用。跟双击
+/// 桌面上的文件夹图标是同一个操作，不是执行任意程序，风险可控。
+///
+/// 用 `spawn` 而不是 `status`：Windows 的 `explorer.exe` 在成功打开窗口后
+/// 经常还是返回非零退出码（这是它自己的老毛病，跟这次操作是否成功没关系），
+/// 用 `status` 判断成功与否反而会把"明明打开了"误判成失败。
+#[cfg(windows)]
+pub fn open_in_file_explorer(dir: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    std::process::Command::new("explorer")
+        .arg(dir)
+        .creation_flags(0x0800_0000)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("无法打开文件夹：{e}"))
+}
+
+/// macOS 开发机预览用：`open` 是 macOS 上等价的"用 Finder 打开这个目录"命令。
+#[cfg(not(windows))]
+pub fn open_in_file_explorer(dir: &Path) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("无法打开文件夹：{e}"))
+}

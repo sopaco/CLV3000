@@ -23,6 +23,22 @@ walkdir = "2.5.0"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_Security", "Win32_System_SystemInformation"] }
 
+# 给 exe 嵌图标资源用的（见 build.rs）。
+#
+# 注意：这里**不能**照搬上面 `windows` 依赖那样写成
+# `[target.'cfg(windows)'.build-dependencies]`——build-dependencies 是在构建
+# 这台机器（host）上编译并运行的（构建脚本本身跑在 host 上，不是跑在最终
+# 编译目标上），Cargo 对 `[target.cfg(...)]` 里的 build-dependencies 是按
+# **host** 平台去匹配 cfg 谓词的，不是按 `--target` 指定的目标平台。实测在这台
+# macOS host 上交叉编译 `--target x86_64-pc-windows-gnu`，`cfg(windows)` 对
+# host（macOS）不成立，`winresource` 会被 Cargo 直接从构建图里剔除，`build.rs`
+# 里的图标嵌入代码根本不会被编译进去、也就不会执行——图标照样嵌不上，而且
+# 编译期没有任何报错，非常隐蔽。所以这里干脆不加 target 限定，任何 host 上都
+# 把 `winresource` 编译进构建脚本，真正的"只在 Windows 上生效"完全交给
+# `build.rs` 里那个 `#[cfg(windows)]`（那个是判断最终编译目标，用对了）。
+[build-dependencies]
+winresource = "0.1.31"
+
 # 老机器优先：release 构建体积/内存优化
 [profile.release]
 opt-level = "s"   # 优化体积而非极限速度，老机器上更看重启动/换页开销

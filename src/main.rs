@@ -42,20 +42,7 @@ fn main() {
     };
 
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("CLV3000")
-            .with_inner_size([900.0, 600.0])
-            .with_min_inner_size([760.0, 520.0])
-            .with_decorations(false)
-            .with_resizable(true)
-            .with_icon(window_icon)
-            // 我们自己画了标题栏/最小化/关闭按钮，这里把系统原生的那一套（尤其是
-            // macOS 上即使 decorations(false) 也可能残留的一小条原生标题区/红绿灯
-            // 按钮）也彻底关掉，避免和自绘的内容重叠、露出系统默认底色。
-            .with_title_shown(false)
-            .with_titlebar_shown(false)
-            .with_titlebar_buttons_shown(false)
-            .with_fullsize_content_view(true),
+        viewport: build_viewport(window_icon),
         ..Default::default()
     };
 
@@ -64,4 +51,35 @@ fn main() {
         native_options,
         Box::new(|cc| Ok(Box::new(app::App::new(cc, tray)))),
     );
+}
+
+/// 按平台配置窗口装饰：Windows 用系统标题栏（避免无边框时客户区顶部"幽灵标题栏"
+/// 导致鼠标坐标与 egui 绘制差一个标题栏高度）；macOS 开发预览继续自绘标题栏。
+fn build_viewport(window_icon: egui::IconData) -> egui::ViewportBuilder {
+    let mut builder = egui::ViewportBuilder::default()
+        .with_title("CLV3000")
+        .with_inner_size([900.0, 600.0])
+        .with_min_inner_size([760.0, 520.0])
+        .with_resizable(true)
+        .with_icon(window_icon);
+
+    #[cfg(windows)]
+    {
+        builder = builder.with_decorations(true);
+    }
+
+    #[cfg(not(windows))]
+    {
+        // 自绘标题栏/最小化/关闭按钮：把系统原生那一套（尤其是 macOS 上即使
+        // decorations(false) 也可能残留的一小条原生标题区/红绿灯按钮）彻底关掉，
+        // 避免和自绘内容重叠、露出系统默认底色。
+        builder = builder
+            .with_decorations(false)
+            .with_title_shown(false)
+            .with_titlebar_shown(false)
+            .with_titlebar_buttons_shown(false)
+            .with_fullsize_content_view(true);
+    }
+
+    builder
 }

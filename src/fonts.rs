@@ -5,7 +5,7 @@
 //!
 //! 找不到任何候选字体时静默跳过，不影响程序启动（只是中文会显示成方框）。
 
-use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
+use egui::epaint::text::{FontInsert, FontPriority, FontTweak, InsertFontFamily};
 use egui::{Context, FontData, FontFamily};
 use std::path::PathBuf;
 
@@ -14,14 +14,37 @@ pub fn install_cjk_font(ctx: &Context) {
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
         };
-        // 之前这里加过一个 y_offset_factor，想让中文字形跟拉丁字体的基线对得更好看。
-        // 结果这个偏移只影响"画笔实际落墨的位置"，不影响"布局用来算居中的包围盒"
-        // （FontTweak 文档里写得很清楚：only a visual effect, does not affect layout）
-        // ——于是变成了图标能在包围盒里居中对齐，但文字的墨迹本身在盒子里偏下，
-        // 看起来就是"图标和文字没对齐"。这是本末倒置，删掉，不做这个补偿。
+        // 之前这里加过一个 y_offset_factor，想让中文字形跟拉丁字体的基线对得更好看，
+        // 结果发现它"只挪墨迹、不挪布局包围盒"，会把图标/文字对齐搞坏（见 SKILL 坑8），
+        // 于是删掉了。但删掉之后中文与数字混排时反而更明显地暴露了另一个真问题：
+        // 用 fontTools 量过 Hiragino Sans GB（macOS 预览用的 CJK 后备字体）跟 egui
+        // 内置拉丁字体 Ubuntu-Light 的字形边界，同一个 1000-unit 的 em 里，汉字的
+        // 视觉高度（约 900 units）比拉丁数字的字面高度（约 720 units）大 25% 左右
+        // ——这是中日韩方块字天生比拉丁字母"更填满"em 格子的字体设计差异，不是
+        // 某个字号或某台机器的偶然现象。同时 Hiragino 的 line-gap 也比 Ubuntu-Light
+        // 大得多（500 vs 28 units），而 epaint 混合字体排版时会按两个字体的
+        // row_height 差值做居中补偿（`text_layout.rs` 里 `0.5 * (font_height -
+        // font_face_height)`），这个差值一大，中文相对数字就会被推得更高，看起来
+        // 像"数字忽大忽小、没和中文对齐"。
+        //
+        // 这里用 `tweak.scale` 把 CJK 字体整体缩小到跟拉丁字体视觉上匹配的比例——
+        // 跟 y_offset 不同，`scale` 会真的改变这个字体的 ascent/descent（进而改变
+        // row_height），所以它能同时压低"字形填得太满"和"row_height 差太多"这两个
+        // 根因，不是"越俎代庖"式的事后位移。0.80 是拿字形边界框算出来的比例
+        // （720/900 ≈ 0.80），在真机截图里逐个验证过仪表盘/病毒库/扫描结果页的
+        // 中文数字混排都对得上；换一个 CJK 字体（比如 Windows 上的雅黑）具体比例
+        // 可能不完全一样，但同类字体的字面设计大同小异，这个量级基本通用。
+        const CJK_SCALE: f32 = 0.80;
         ctx.add_font(FontInsert {
             name: "cjk-fallback".to_owned(),
-            data: FontData::from_owned(bytes),
+            data: FontData {
+                font: std::borrow::Cow::Owned(bytes),
+                index: 0,
+                tweak: FontTweak {
+                    scale: CJK_SCALE,
+                    ..Default::default()
+                },
+            },
             families: vec![
                 InsertFontFamily {
                     family: FontFamily::Proportional,

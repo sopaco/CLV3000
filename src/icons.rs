@@ -177,12 +177,41 @@ pub fn hamburger(painter: &Painter, rect: Rect, stroke: Stroke) {
     }
 }
 
-/// 标题栏"最小化"按钮图标：一条横线。
+/// "信息"图标：圆圈 + 一个 "i"（上面一个点，下面一条竖线）。病毒库路径那个
+/// "查看完整路径"按钮用，跟 warning_triangle 的感叹号是同一种画法（圆点+竖线）。
+pub fn info_circle(painter: &Painter, rect: Rect, stroke: Stroke) {
+    let radius = rect.width().min(rect.height()) / 2.0;
+    painter.circle_stroke(rect.center(), radius, stroke);
+    painter.circle_filled(map(rect, 0.5, 0.30), stroke.width * 1.1, stroke.color);
+    painter.line_segment([map(rect, 0.5, 0.46), map(rect, 0.5, 0.74)], stroke);
+}
+
+/// "文件夹"图标：线框风格，前片比后片矮一点，暗示"翻盖"的立体感。"打开所在
+/// 文件夹"按钮用。
+pub fn folder(painter: &Painter, rect: Rect, stroke: Stroke) {
+    let pts: Vec<Pos2> = [
+        (0.10, 0.24),
+        (0.10, 0.20),
+        (0.36, 0.20),
+        (0.46, 0.34),
+        (0.90, 0.34),
+        (0.90, 0.80),
+        (0.10, 0.80),
+    ]
+    .iter()
+    .map(|&(u, v)| map(rect, u, v))
+    .collect();
+    painter.add(polyline(&pts, stroke, true));
+}
+
+/// 标题栏"最小化"按钮图标：一条横线（仅 macOS 自绘标题栏使用）。
+#[cfg(not(windows))]
 pub fn minimize(painter: &Painter, rect: Rect, stroke: Stroke) {
     painter.line_segment([map(rect, 0.2, 0.5), map(rect, 0.8, 0.5)], stroke);
 }
 
-/// 标题栏"关闭"按钮图标：一个 X。
+/// 标题栏"关闭"按钮图标：一个 X（仅 macOS 自绘标题栏使用）。
+#[cfg(not(windows))]
 pub fn close(painter: &Painter, rect: Rect, stroke: Stroke) {
     painter.line_segment([map(rect, 0.2, 0.2), map(rect, 0.8, 0.8)], stroke);
     painter.line_segment([map(rect, 0.8, 0.2), map(rect, 0.2, 0.8)], stroke);

@@ -7,3 +7,7 @@
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"
 ar = "x86_64-w64-mingw32-gcc-ar"
+
+# 在 macOS/Linux 上打 Windows release 包时用这条，才会走 build.rs 嵌 exe 图标。
+[alias]
+build-win = "build --release --target x86_64-pc-windows-gnu"
