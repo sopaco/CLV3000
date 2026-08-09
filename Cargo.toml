@@ -1,0 +1,32 @@
+[package]
+name = "clv3000"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+directories = "6.0.0"
+eframe = { version = "0.36.1", default-features = false, features = ["glow", "default_fonts", "persistence"] }
+egui = "0.36.1"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+muda = "0.19.3"
+serde = { version = "1.0.229", features = ["derive"] }
+sysinfo = "0.39.6"
+toml = "1.1.4"
+tray-icon = "0.24.2"
+walkdir = "2.5.0"
+
+# 只在真的编译 Windows 目标时才拉 `windows` crate 及其一大串子 crate 进依赖图——
+# 这些子 crate 里有的（比如 windows-future）在非 Windows target 上编译不干净，
+# 之前把它写成普通 [dependencies] 会导致哪怕代码里全用 #[cfg(windows)] 保护好了，
+# Cargo 依然会尝试给 macOS/Linux target 编译整个 windows 依赖图，直接编译失败。
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_Security", "Win32_System_SystemInformation"] }
+
+# 老机器优先：release 构建体积/内存优化
+[profile.release]
+opt-level = "s"   # 优化体积而非极限速度，老机器上更看重启动/换页开销
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

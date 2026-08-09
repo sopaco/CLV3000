@@ -1,0 +1,9 @@
+# 只给"显式要求交叉编译到 Windows"的场景配 linker，不再强制默认 target。
+# 这样：
+# - 在真 Windows 机器上，`cargo build --release` 走的是 host 自身的 toolchain（msvc/gnu 都行）。
+# - 在 macOS/Linux 开发机上，`cargo run` 默认编译成本机可执行文件——配合 mock 实现，
+#   直接原生跑起来看 UI/交互，不用比着 Windows 目标硬编译。
+# - 真要从 macOS/Linux 交叉编译 Windows 版，显式加 `--target x86_64-pc-windows-gnu`。
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-gcc-ar"
