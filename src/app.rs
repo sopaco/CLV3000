@@ -313,7 +313,8 @@ fn run_freshclam() -> Result<UpdateOutcome, String> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    let db_dir = paths::clamav_database_dir();
+    let db_dir = paths::resolved_clamav_database_dir()
+        .unwrap_or_else(|| paths::clamav_database_dir());
     // 跑之前先记一份数据库目录签名，跑完再比对——freshclam 在"已是最新"时
     // 也返回退出码 0，光看退出码会把"没变化"误判成"更新成功"。
     let before = database_signature(&db_dir);
@@ -384,7 +385,8 @@ fn database_signature(dir: &std::path::Path) -> String {
 fn run_freshclam() -> Result<UpdateOutcome, String> {
     use std::process::{Command, Stdio};
 
-    let db_dir = paths::clamav_database_dir();
+    let db_dir = paths::resolved_clamav_database_dir()
+        .unwrap_or_else(|| paths::clamav_database_dir());
     // 跑之前先记一份数据库目录签名，跑完再比对——freshclam 在"已是最新"时
     // 也返回退出码 0，光看退出码会把"没变化"误判成"更新成功"。
     let before = database_signature(&db_dir);
@@ -1465,7 +1467,8 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
             "Scan engine not found"
         };
         let detail_dir = if available {
-            paths::clamav_database_dir()
+            paths::resolved_clamav_database_dir()
+                .unwrap_or_else(|| paths::clamav_database_dir())
         } else {
             paths::clamav_dir()
         };

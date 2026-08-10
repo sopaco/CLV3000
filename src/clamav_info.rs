@@ -68,8 +68,15 @@ fn run_clamscan_version_flag() -> Result<String, String> {
 
 #[cfg(target_os = "macos")]
 fn run_clamscan_version_flag() -> Result<String, String> {
-    let output = Command::new(paths::clamscan_path())
-        .arg("-V")
+    let mut cmd = Command::new(paths::clamscan_path());
+    cmd.arg("-V");
+    // macOS 上 ClamAV 的默认库目录通常是空的（手动安装时库在 ~/.clamav），
+    // 不指定 -d 的话 `clamscan -V` 只打印引擎版本、不带 daily 库编号与日期；
+    // 显式传入解析到的库目录，让版本号里带上库信息（如 `1.5.4/28088/...`）。
+    if let Some(db) = paths::resolved_clamav_database_dir() {
+        cmd.arg("-d").arg(db);
+    }
+    let output = cmd
         .output()
         .map_err(|e| e.to_string())?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -116,7 +123,8 @@ fn first_line(text: &str) -> String {
 
 /// 引擎不可用时，尽量从 `database\` 目录里的签名文件推断状态。
 fn summarize_database_files() -> String {
-    let dir = paths::clamav_database_dir();
+    let dir = paths::resolved_clamav_database_dir()
+        .unwrap_or_else(|| paths::clamav_database_dir());
     if !dir.is_dir() {
         return format!("Not found ({})", dir.display());
     }
