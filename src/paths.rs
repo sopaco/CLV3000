@@ -57,10 +57,10 @@ pub fn freshclam_available() -> bool {
     true
 }
 
-/// `%APPDATA%\CLV3000\`
+/// `%APPDATA%\CLV3000\`（Windows）。不套公司/组织名子目录，直接落在 APPDATA 下的 CLV3000。
 pub fn app_data_dir() -> PathBuf {
-    directories::ProjectDirs::from("com", "hytechc", "CLV3000")
-        .map(|p| p.config_dir().to_path_buf())
+    directories::BaseDirs::new()
+        .map(|b| b.config_dir().join("CLV3000"))
         .unwrap_or_else(|| exe_dir().join("config"))
 }
 

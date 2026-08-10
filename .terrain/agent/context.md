@@ -44,6 +44,8 @@ graph LR
 | 扫描引擎 | 封装 clamscan 子进程：`--file-list=- -v --no-summary` 流式喂 stdin、逐行解析 `path: status`、软+硬双保险取消 | `src/scan/engine.rs` |
 | 闪电扫描 | Win32 ToolHelp 拍进程快照、枚举各进程模块、HashSet 去重；两阶段（先枚举拿总数再扫） | `src/scan/quick_scan.rs` |
 | 全盘扫描 | `GetLogicalDrives`/`GetDriveTypeW` 枚举磁盘，walkdir 遍历，可执行扩展名白名单前置过滤，边发现边喂 | `src/scan/full_scan.rs` |
+| 扫描缓存 | blake3 内容哈希→扫描结果(干净/检出)的磁盘缓存；按病毒库修订号失效、TTL/驱逐/压缩、TSV 持久化 | `src/scan/cache.rs` |
+| Authenticode 校验 | PE 文件判定 + WinVerifyTrust 信任签名验证（`verify_trusted` 按 action GUID） | `src/scan/authenticode.rs` |
 | 扫描协议 | `ScanEvent`/`Threat`/`ScanKind`/`CancelFlag(AtomicBool)` 统一契约 | `src/scan/mod.rs` |
 | 主界面编排 | 四页面(Dashboard/QuickScan/VirusDb/FullScan)、自绘标题栏、`ScanPageState` 轮询状态机、Toast | `src/app.rs` |
 | 配置持久化 | TOML：上次扫描摘要 `ScanRecord`、忽略列表 `IgnoredEntry`、可移动盘开关；损坏回退默认 | `src/config.rs` |
@@ -72,7 +74,8 @@ graph LR
 
 - **语言/版本**：Rust 2024 edition，v0.7.0；无 async 运行时（ADR：阻塞 IO 场景线程更简单、取消=kill 直白）。
 - **GUI**：eframe/egui 0.36（glow + default_fonts）；即时模式，自绘深色主题与矢量图标（`theme.rs`/`icons.rs`，参照 `clv3000-design` skill 设计令牌）。
-- **平台 API**：windows crate 0.62（ToolHelp 进程/模块枚举、磁盘枚举、CreateMutexW、GetLocalTime、`CREATE_NO_WINDOW` 隐藏子进程控制台）。
+- **平台 API**：windows crate 0.62（ToolHelp 进程/模块枚举、磁盘枚举、CreateMutexW、GetLocalTime、`CREATE_NO_WINDOW` 隐藏子进程控制台；`Win32_Security_WinTrust`/`Win32_Security_Cryptography` 支撑 Authenticode 信任签名校验）。
+- **哈希**：blake3 1（文件内容哈希，作扫描缓存键）。
 - **托盘**：tray-icon 0.24 + muda 0.19（菜单）。
 - **系统监控**：sysinfo 0.39（CPU/内存采样）。
 - **持久化**：serde + toml → `%APPDATA%\CLV3000\config.toml`。
@@ -103,6 +106,8 @@ graph LR
 | 子进程引擎 | `src/scan/engine.rs` | `run()` 三线程(写/读/看门狗)；`rsplit_result_line`/`parse_infected` |
 | 进程模块枚举 | `src/scan/quick_scan.rs` | `snapshot_pids`/`modules_of_process` |
 | 磁盘遍历 | `src/scan/full_scan.rs` | `walk`/`local_drive_roots`/扩展名白名单 |
+| 扫描缓存 | `src/scan/cache.rs` | `ScanCache`/`Record`：`open`/`lookup`/`insert`/`save`/`compact`、`db_revision`/`file_hash` |
+| 签名校验 | `src/scan/authenticode.rs` | `is_pe_file`/`is_trusted_signed`/`verify_trusted`（WinVerifyTrust） |
 | 配置模型 | `src/config.rs` | `AppConfig`/`ScanRecord`/`IgnoredEntry`；`is_ignored`/`add_ignored` |
 | 路径解析 | `src/paths.rs` | exe 相对 clamav 目录 + `%APPDATA%` 配置路径 |
 | 托盘菜单与事件 | `src/tray.rs` | `Tray`/`TrayMenuIds`/`build` |
@@ -114,4 +119,3 @@ graph LR
 | 启动装配 / 单实例 | `src/main.rs`+`src/single_instance.rs` | viewport 构建、图标、Mutex 锁 |
 | 图标资产 | `src/icons.rs`+`src/icon_data.rs` | 手绘矢量 + RGBA 程序图标 |
 | UI 原语与主题 | `src/widgets.rs`+`src/theme.rs` | progress_ring/stat_pill/threat_card/Toast；深色令牌 |
-```

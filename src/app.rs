@@ -1,5 +1,6 @@
 //! 主界面：仪表盘 / 闪电扫描 / 病毒库 / 全盘扫描 四个页面 + 自绘标题栏 + 全局底部资源条。
 
+use crate::clamav_info::ClamAvInfo;
 use crate::config::{AppConfig, ScanRecord};
 use crate::lifecycle::{Lifecycle, RunMode};
 use crate::localtime::Timestamp;
@@ -205,13 +206,29 @@ impl ScanPageState {
     }
 }
 
+/// 病毒库更新结果：区分"真的更新了"和"已经是最新、无需更新"。
+/// freshclam 在两者下都返回退出码 0，不能只靠退出码判断，否则会把
+/// "已是最新"也误报成"更新完成"，让用户以为版本涨了。
+/// 两个变体分别在 `run_freshclam`（Windows 真更新 / 未变）与开发 mock 中构造，
+/// 并由 `poll_background` 的 `match` 消费——无 dead_code 警告。
+#[derive(Debug, Clone, Copy)]
+enum UpdateOutcome {
+    Updated,
+    AlreadyUpToDate,
+}
+
 struct VirusDbState {
     updating: bool,
-    rx: Option<Receiver<Result<(), String>>>,
+    rx: Option<Receiver<Result<UpdateOutcome, String>>>,
+    /// 后台版本查询（`refresh_db_version`）的回传通道。`db_version` 在 `poll` 里
+    /// 从这条通道接收结果写回，保证版本刷新不阻塞 UI 线程。
+    version_rx: Option<Receiver<String>>,
     /// 左右两栏各自的上一帧内容高度，给 `widgets::vertically_centered` 用。两栏
     /// 内容不一样高，各自居中，不能共用一个高度。
     status_col_height: f32,
     about_col_height: f32,
+    /// 当前病毒库版本（来自 `clamscan -V`），更新完成后刷新，避免界面一直显示旧版本。
+    db_version: Option<String>,
 }
 
 impl VirusDbState {
@@ -219,9 +236,26 @@ impl VirusDbState {
         Self {
             updating: false,
             rx: None,
+            version_rx: None,
             status_col_height: 0.0,
             about_col_height: 0.0,
+            db_version: None,
         }
+    }
+
+    /// 异步重新查询病毒库版本：后台线程跑 `clamscan -V`，结果经 `version_rx` 回传，
+    /// 不在 UI 线程阻塞（之前是同步调 `database_version()`，会卡住一帧）。
+    /// 已有查询在飞（`version_rx` 挂着）就跳过，避免重复发起。
+    fn refresh_db_version(&mut self) {
+        if self.version_rx.is_some() {
+            return; // 已有查询在飞，不重复发起
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.version_rx = Some(rx);
+        std::thread::spawn(move || {
+            let v = ClamAvInfo::database_version();
+            let _ = tx.send(v);
+        });
     }
 
     fn start_update(&mut self) {
@@ -237,45 +271,123 @@ impl VirusDbState {
         });
     }
 
-    /// 返回本次轮询里出现的结果（如果有）。
-    fn poll(&mut self) -> Option<Result<(), String>> {
-        let mut result = None;
-        if let Some(rx) = &self.rx
-            && let Ok(r) = rx.try_recv()
-        {
-            self.updating = false;
-            result = Some(r);
+    /// 返回本次轮询里出现的更新结果（如果有）；同时把后台版本查询结果写回
+    /// `db_version`（不弹 toast）。两条通道都在主线程这里排空，UI 线程读取的
+    /// `db_version` 永远由主线程写入，无数据竞争。
+    fn poll(&mut self) -> Option<Result<UpdateOutcome, String>> {
+        // 先处理更新结果（来自 start_update 的后台线程）。
+        let update_result = match self.rx.as_ref().map(|rx| rx.try_recv()) {
+            Some(Ok(r)) => {
+                self.updating = false;
+                Some(r)
+            }
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                // 后台线程异常退出（panic / 被强杀）会触发通道断开，
+                // 否则 `updating` 永远为 true，按钮永久卡在 "Updating…"。
+                self.updating = false;
+                self.rx = None;
+                Some(Err("Update thread stopped unexpectedly".to_string()))
+            }
+            _ => None,
+        };
+
+        // 再处理版本查询结果（来自 refresh_db_version 的后台线程）。
+        match self.version_rx.as_ref().map(|rx| rx.try_recv()) {
+            Some(Ok(v)) => {
+                self.db_version = Some(v);
+                self.version_rx = None;
+            }
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                // 版本查询线程异常退出：清掉孤儿 Receiver，下次需要时会重新发起。
+                self.version_rx = None;
+            }
+            _ => {}
         }
-        result
+
+        update_result
     }
 }
 
 #[cfg(windows)]
-fn run_freshclam() -> Result<(), String> {
+fn run_freshclam() -> Result<UpdateOutcome, String> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    let mut cmd = Command::new(paths::freshclam_path());
-    cmd.arg(format!(
-        "--datadir={}",
-        paths::clamav_database_dir().display()
-    ))
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .creation_flags(0x0800_0000);
+    let db_dir = paths::clamav_database_dir();
+    // 跑之前先记一份数据库目录签名，跑完再比对——freshclam 在"已是最新"时
+    // 也返回退出码 0，光看退出码会把"没变化"误判成"更新成功"。
+    let before = database_signature(&db_dir);
 
-    match cmd.status() {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(format!("Database update failed with exit code {status}")),
+    let mut cmd = Command::new(paths::freshclam_path());
+    cmd.arg(format!("--datadir={}", db_dir.display()))
+        .stdout(Stdio::null())
+        // 保留 stderr 管道：freshclam 的报错（配置文件缺失、连不上镜像源等）都走
+        // stderr，失败时把它塞进错误提示，比只报退出码有用得多。
+        .stderr(Stdio::piped())
+        .creation_flags(0x0800_0000);
+
+    match cmd.output() {
+        Ok(out) if out.status.success() => {
+            let after = database_signature(&db_dir);
+            if after != before {
+                Ok(UpdateOutcome::Updated)
+            } else {
+                Ok(UpdateOutcome::AlreadyUpToDate)
+            }
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            if stderr.is_empty() {
+                Err(format!("Database update failed with exit code {}", out.status))
+            } else {
+                Err(format!("Database update failed (exit {}): {}", out.status, stderr))
+            }
+        }
         Err(e) => Err(format!("Failed to start freshclam: {e}")),
     }
 }
 
+/// 数据库目录签名：把所有签名文件（.cvd/.cld/.cud）的「文件名:大小:修改时间」
+/// 拼成一段稳定字符串，用来判断 freshclam 跑完之后文件到底有没有变。
+#[cfg(windows)]
+fn database_signature(dir: &std::path::Path) -> String {
+    use std::collections::BTreeMap;
+    let mut map: BTreeMap<String, (u64, std::time::SystemTime)> = BTreeMap::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if matches!(ext, "cvd" | "cld" | "cud") {
+                if let Ok(meta) = std::fs::metadata(&p) {
+                    let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                        map.insert(name.to_string(), (meta.len(), mtime));
+                    }
+                }
+            }
+        }
+    }
+    let mut sig = String::new();
+    for (name, (len, mtime)) in map {
+        sig.push_str(&format!("{name}:{len}:{mtime:?}|"));
+    }
+    sig
+}
+
 /// 开发预览用：不真的联网更新，睡一下模拟"正在更新"的等待感，然后报成功。
+/// 用原子计数器在 `Updated` / `AlreadyUpToDate` 之间来回切，方便开发时预览两种
+/// 提示文案；同时保证 `AlreadyUpToDate` 变体在非 Windows 构建里也被构造
+/// （否则会触发 dead_code 警告——Windows 真路径会构造它，但 dev 桩原本只造 Updated）。
 #[cfg(not(windows))]
-fn run_freshclam() -> Result<(), String> {
+fn run_freshclam() -> Result<UpdateOutcome, String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static TOGGLE: AtomicUsize = AtomicUsize::new(0);
     std::thread::sleep(Duration::from_millis(1200));
-    Ok(())
+    if TOGGLE.fetch_add(1, Ordering::Relaxed) % 2 == 0 {
+        Ok(UpdateOutcome::Updated)
+    } else {
+        Ok(UpdateOutcome::AlreadyUpToDate)
+    }
 }
 
 /// 跨「窗口会话」保留的业务状态（配置、扫描、页面路由）。纯托盘模式下也存在。
@@ -327,7 +439,14 @@ impl AppCore {
         }
         if let Some(result) = self.virus_db.poll() {
             match result {
-                Ok(()) => toasts.push("Database update complete".to_string()),
+                Ok(UpdateOutcome::Updated) => {
+                    self.virus_db.refresh_db_version();
+                    toasts.push("Virus database updated".to_string());
+                }
+                Ok(UpdateOutcome::AlreadyUpToDate) => {
+                    self.virus_db.refresh_db_version();
+                    toasts.push("Virus database already up to date".to_string());
+                }
                 Err(e) => toasts.push(format!("Database update failed: {e}")),
             }
         }
@@ -1293,6 +1412,11 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
         ui.add_space(14.0);
 
         let available = paths::clamscan_available();
+        // 第一次画这一栏时顺带查一次版本（只查这一次，之后靠"更新完成"事件刷新），
+        // 避免每帧都拉起 clamscan 进程。更新成功后 `db_version` 会从旧值刷新成新值。
+        if core.virus_db.db_version.is_none() {
+            core.virus_db.refresh_db_version();
+        }
         let status = if available {
             "Built-in database ready"
         } else {
@@ -1326,6 +1450,14 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
                     .on_hover_text(path_display.as_str());
             },
         );
+
+        if let Some(ver) = &core.virus_db.db_version {
+            ui.label(
+                egui::RichText::new(format!("Version: {ver}"))
+                    .color(colors::TEXT_MUTED)
+                    .small(),
+            );
+        }
 
         ui.add_space(16.0);
         // "打开所在文件夹"和"手动更新病毒库"放同一行——都是这一栏里的辅助操作，

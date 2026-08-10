@@ -15,13 +15,14 @@ sysinfo = "0.39.6"
 toml = "1.1.4"
 tray-icon = "0.24.2"
 walkdir = "2.5.0"
+blake3 = "1"   # 文件基因缓存：内容哈希，纯 Rust、跨平台、比 SHA-256 快很多
 
 # 只在真的编译 Windows 目标时才拉 `windows` crate 及其一大串子 crate 进依赖图——
 # 这些子 crate 里有的（比如 windows-future）在非 Windows target 上编译不干净，
 # 之前把它写成普通 [dependencies] 会导致哪怕代码里全用 #[cfg(windows)] 保护好了，
 # Cargo 依然会尝试给 macOS/Linux target 编译整个 windows 依赖图，直接编译失败。
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_Security", "Win32_System_SystemInformation"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_Security", "Win32_Security_WinTrust", "Win32_Security_Cryptography", "Win32_System_SystemInformation"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.9.4"

@@ -25,8 +25,11 @@ pub fn run(paths: Vec<PathBuf>, tx: Sender<ScanEvent>, cancel: CancelFlag) {
 
 #[cfg(windows)]
 mod real {
+    use super::super::authenticode;
+    use super::super::cache;
     use super::super::{CancelFlag, ScanEvent};
     use crate::paths;
+    use std::collections::HashMap;
     use std::io::{BufRead, BufReader, Write};
     use std::os::windows::process::CommandExt;
     use std::path::{Path, PathBuf};
@@ -41,6 +44,8 @@ mod real {
 
     pub fn run(paths: Vec<PathBuf>, tx: Sender<ScanEvent>, cancel: CancelFlag) {
         let start = Instant::now();
+        // 已扫文件计数：缓存命中的文件也会在这里累加，UI 进度才对得上总数。
+        let mut scanned: usize = 0;
 
         if !paths::clamscan_available() {
             let _ = tx.send(ScanEvent::Error(format!(
@@ -64,14 +69,66 @@ mod real {
             return;
         }
 
+        // ── 文件基因缓存：按内容哈希复用上次结果，重复扫描近乎免费 ──
+        // 大于这个体积的文件不进缓存（避免无谓地哈希大文件）；它们仍会被 ClamAV 正常扫描。
+        const CACHE_SKIP_SIZE: u64 = 64 * 1024 * 1024;
+        let cache_path = paths::app_data_dir().join("scan_cache.tsv");
+        paths::ensure_dir(&paths::app_data_dir());
+        // 缓存不可用不会阻断扫描：open 内部失败会退化为空缓存，insert 失败也会静默忽略。
+        let mut cache = cache::ScanCache::open(&cache_path, &paths::clamav_database_dir());
+
+        // 预筛：能命中有效缓存的文件直接判结果并跳过 ClamAV；其余交给 ClamAV 扫。
+        let mut to_scan: Vec<PathBuf> = Vec::new();
+        let mut hash_by_path: HashMap<String, String> = HashMap::new();
+        for p in &paths {
+            let too_big = std::fs::metadata(p)
+                .map(|m| m.len() > CACHE_SKIP_SIZE)
+                .unwrap_or(false);
+            if too_big {
+                to_scan.push(p.clone());
+                continue;
+            }
+            match cache::file_hash(p) {
+                Some(hash) => {
+                    if let Some(res) = cache.lookup(&hash) {
+                        let infected = if res == "clean" { None } else { Some(res) };
+                        scanned += 1;
+                        let _ = tx.send(ScanEvent::FileScanned {
+                            path: p.display().to_string(),
+                            infected,
+                        });
+                        continue;
+                    }
+                    // 基因缓存未命中：PE 文件先跑 Authenticode 预筛。可信签名的文件
+                    // 直接判干净并跳过 ClamAV（首扫就见效），同时把结果写回基因缓存，
+                    // 下次连 WinVerifyTrust 都不用再跑。
+                    if authenticode::is_trusted_signed(p) {
+                        scanned += 1;
+                        let _ = tx.send(ScanEvent::FileScanned {
+                            path: p.display().to_string(),
+                            infected: None,
+                        });
+                        cache.insert(&hash, "clean");
+                        continue;
+                    }
+                    hash_by_path.insert(p.display().to_string(), hash);
+                    to_scan.push(p.clone());
+                }
+                None => {
+                    // 读不了（被锁/无权限），交给 ClamAV 自行处理。
+                    to_scan.push(p.clone());
+                }
+            }
+        }
+
         // ClamAV 1.5.x 不支持 `--file-list=-`（stdin），必须写入实际临时文件。
         // 单实例应用 + is_running() 互斥保证同一时刻只有一个扫描在跑，用 PID 命名足够。
         let temp_path = std::env::temp_dir()
             .join(format!("clv3000_scanlist_{}.txt", std::process::id()));
-        if let Err(e) = write_path_list(&temp_path, &paths) {
+        if let Err(e) = write_path_list(&temp_path, &to_scan) {
             let _ = tx.send(ScanEvent::Error(format!("Failed to write scan list: {e}")));
             let _ = tx.send(ScanEvent::Finished {
-                scanned: 0,
+                scanned,
                 elapsed: start.elapsed(),
                 cancelled: cancel.load(Ordering::SeqCst),
             });
@@ -113,7 +170,7 @@ mod real {
             // 大小与超时限制：跳过过大的文件、限制单文件扫描时间。
             .arg("--max-filesize=100M")       // 超过 100MB 的文件跳过（视为干净）
             .arg("--max-scansize=200M")       // 容器文件最大扫描数据量
-            .arg("--max-scantime=5000")       // 单文件超 2 秒视为干净（原 10s 太宽松）
+            .arg("--max-scantime=5000")       // 单文件扫描超时上限 5 秒，超时则判为干净（避免个别文件拖垮整体）
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .creation_flags(CREATE_NO_WINDOW);
@@ -182,12 +239,16 @@ mod real {
         //   Scanning C:\path\to\file.exe        ← -v 的进度提示，不含 ": "，会被 rsplit 过滤掉
         //   C:\path\to\file.exe: OK             ← 正常
         //   C:\path\to\file.exe: Win.Test.EICAR_HDB-1 FOUND  ← 感染
-        let mut scanned: usize = 0;
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
             let Ok(line) = line else { break };
             if let Some((path, status)) = rsplit_result_line(&line) {
                 let infected = parse_infected(status);
+                // 把这次结果写回基因缓存（按内容哈希），下次同文件直接命中。
+                if let Some(hash) = hash_by_path.get(path) {
+                    let result = infected.clone().unwrap_or_else(|| "clean".to_string());
+                    cache.insert(hash, &result);
+                }
                 scanned += 1;
                 let _ = tx.send(ScanEvent::FileScanned {
                     path: path.to_string(),
@@ -205,6 +266,7 @@ mod real {
         }
 
         let _ = std::fs::remove_file(&temp_path);
+        cache.save();
 
         let cancelled = cancel.load(Ordering::SeqCst);
 

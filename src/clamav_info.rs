@@ -17,6 +17,11 @@ impl ClamAvInfo {
             database: query_database_version(),
         }
     }
+
+    /// 只查病毒库版本（更新完成后刷新界面用，避免再跑一遍引擎查询）。
+    pub fn database_version() -> String {
+        query_database_version()
+    }
 }
 
 fn query_engine_version() -> String {

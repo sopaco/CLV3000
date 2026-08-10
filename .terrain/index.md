@@ -30,6 +30,8 @@ source: .
   - README.md
   - .cargo/
     - config.toml
+  - .workbuddy/
+    - memory/
   - .gitignore
   - AGENTS.md
   - assets/

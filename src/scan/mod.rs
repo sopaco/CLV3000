@@ -1,6 +1,11 @@
 //! 扫描相关的共享类型：闪电扫描 (quick_scan) 和全盘扫描 (full_scan) 都会产出这些事件，
 //! 由 engine.rs 负责真正调用 clamscan 子进程，quick_scan/full_scan 负责"喂路径"并附加各自的统计信息。
 
+pub mod authenticode;
+// 仅 Windows 编译/使用：缓存与 Authenticode 预筛都只在 engine::real::run（Windows 子进程路径）里被调用，
+// 非 Windows 的 mock 引擎不引用，故整模块按目标平台门控，避免主机构建出一堆 never-used 警告。
+#[cfg(windows)]
+pub mod cache;
 pub mod engine;
 pub mod full_scan;
 pub mod quick_scan;
