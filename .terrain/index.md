@@ -26,6 +26,7 @@ source: .
   - .claude/
     - skills/
   - Cargo.lock
+  - build.rs
   - README.md
   - .cargo/
     - config.toml
@@ -46,10 +47,14 @@ source: .
     - paths.rs
     - theme.rs
     - tray.rs
+    - clamav_info.rs
     - scan/
+    - tray_pump.rs
+    - about_dialog.rs
     - localtime.rs
-    - fonts.rs
     - main.rs
+    - lifecycle.rs
     - app.rs
     - widgets.rs
     - single_instance.rs
+    - tray_loop.rs
