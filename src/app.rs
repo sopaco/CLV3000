@@ -349,7 +349,7 @@ fn run_freshclam() -> Result<UpdateOutcome, String> {
 
 /// 数据库目录签名：把所有签名文件（.cvd/.cld/.cud）的「文件名:大小:修改时间」
 /// 拼成一段稳定字符串，用来判断 freshclam 跑完之后文件到底有没有变。
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn database_signature(dir: &std::path::Path) -> String {
     use std::collections::BTreeMap;
     let mut map: BTreeMap<String, (u64, std::time::SystemTime)> = BTreeMap::new();
@@ -378,7 +378,49 @@ fn database_signature(dir: &std::path::Path) -> String {
 /// 用原子计数器在 `Updated` / `AlreadyUpToDate` 之间来回切，方便开发时预览两种
 /// 提示文案；同时保证 `AlreadyUpToDate` 变体在非 Windows 构建里也被构造
 /// （否则会触发 dead_code 警告——Windows 真路径会构造它，但 dev 桩原本只造 Updated）。
-#[cfg(not(windows))]
+/// macOS：真实调用 `freshclam` 更新病毒库，逻辑与 Windows 版一致（跑前/跑后比对
+/// 数据库目录签名，区分"已更新"与"已是最新"），只是不需要 `creation_flags`。
+#[cfg(target_os = "macos")]
+fn run_freshclam() -> Result<UpdateOutcome, String> {
+    use std::process::{Command, Stdio};
+
+    let db_dir = paths::clamav_database_dir();
+    // 跑之前先记一份数据库目录签名，跑完再比对——freshclam 在"已是最新"时
+    // 也返回退出码 0，光看退出码会把"没变化"误判成"更新成功"。
+    let before = database_signature(&db_dir);
+
+    let mut cmd = Command::new(paths::freshclam_path());
+    cmd.arg(format!("--datadir={}", db_dir.display()))
+        .stdout(Stdio::null())
+        // 保留 stderr 管道：freshclam 的报错（配置文件缺失、连不上镜像源等）都走
+        // stderr，失败时把它塞进错误提示，比只报退出码有用得多。
+        .stderr(Stdio::piped());
+
+    match cmd.output() {
+        Ok(out) if out.status.success() => {
+            let after = database_signature(&db_dir);
+            if after != before {
+                Ok(UpdateOutcome::Updated)
+            } else {
+                Ok(UpdateOutcome::AlreadyUpToDate)
+            }
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            if stderr.is_empty() {
+                Err(format!("Database update failed with exit code {}", out.status))
+            } else {
+                Err(format!("Database update failed (exit {}): {}", out.status, stderr))
+            }
+        }
+        Err(e) => Err(format!("Failed to start freshclam: {e}")),
+    }
+}
+
+/// 开发预览用（Linux 等）：不真的联网更新，睡一下模拟"正在更新"的等待感，然后报成功。
+/// 用原子计数器在 `Updated` / `AlreadyUpToDate` 之间来回切，方便开发时预览两种
+/// 提示文案。
+#[cfg(not(any(windows, target_os = "macos")))]
 fn run_freshclam() -> Result<UpdateOutcome, String> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static TOGGLE: AtomicUsize = AtomicUsize::new(0);

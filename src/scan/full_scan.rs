@@ -1,12 +1,16 @@
-//! 全盘扫描：枚举本地固定磁盘，按可执行文件扩展名过滤后交给 clamscan。
+//! 全盘扫描：枚举本地固定磁盘，按可执行文件类型过滤后交给 clamscan。
 //!
-//! 流程：先遍历磁盘收集所有可执行文件路径（walk），再把完整列表交给 engine.rs
+//! 流程：先遍历磁盘收集所有待扫文件路径（walk），再把完整列表交给 engine.rs
 //! 一次性扫描。不再使用 stdin 流式喂路径——ClamAV 1.5.x 的 `--file-list=-` 不支持
 //! stdin，必须写入临时文件，所以只能先收集完整列表。
 //!
-//! 非 Windows（macOS/Linux 开发机预览）：磁盘枚举（`GetLogicalDrives`/`GetDriveTypeW`）
-//! 是 Win32 API，这里不去扫真实的 mac 文件系统（也扫不出什么"可执行文件"，还白白
-//! 耗 I/O），改成 `mock` 子模块直接生成一批假路径喂给（同样是 mock 的）引擎。
+//! 平台实现：
+//! - Windows：用 `GetLogicalDrives`/`GetDriveTypeW` 枚举盘符，按 `.exe/.dll/...`
+//!   扩展名白名单过滤（`real_windows`）。
+//! - macOS：启动盘固定为 `/`，可选包含 `/Volumes/*` 挂载的可移动盘；按 **Mach-O 魔数**
+//!   识别可执行文件（macOS 没有 `.exe` 扩展名概念），WalkDir 遍历时实时过滤
+//!   （`real_macos`）。权限不足/不可读的目录由 WalkDir 静默跳过，不阻塞整体流程。
+//! - 其它（Linux 等开发机预览）：`mock` 直接生成一批假路径喂给（同样是 mock 的）引擎。
 
 use super::engine;
 use super::{CancelFlag, ScanEvent};
@@ -15,15 +19,17 @@ use std::sync::mpsc::Sender;
 
 /// 阻塞执行，调用者需要自己 spawn 一个线程来跑它。
 pub fn run(tx: Sender<ScanEvent>, cancel: CancelFlag, include_removable: bool) {
-    // mock::walk 不需要这个参数——只有 real::walk（真的枚举磁盘）才关心是否包含可移动盘。
-    #[cfg(not(windows))]
+    // mock::walk 不需要这个参数——只有真实 walk（真的枚举磁盘）才关心是否包含可移动盘。
+    #[cfg(not(any(windows, target_os = "macos")))]
     let _ = include_removable;
 
-    // 1. 遍历磁盘，收集所有可执行文件路径。
+    // 1. 遍历磁盘，收集所有待扫文件路径。
     //    全盘扫描不知道总数（遍历完才知道），所以 total 传 None，UI 显示"已扫描 N 个"而非百分比。
     #[cfg(windows)]
-    let paths = real::walk(&cancel, include_removable);
-    #[cfg(not(windows))]
+    let paths = real_windows::walk(&cancel, include_removable);
+    #[cfg(target_os = "macos")]
+    let paths = real_macos::walk(&cancel, include_removable);
+    #[cfg(not(any(windows, target_os = "macos")))]
     let paths = mock::walk(&cancel);
 
     if cancel.load(Ordering::SeqCst) {
@@ -41,7 +47,7 @@ pub fn run(tx: Sender<ScanEvent>, cancel: CancelFlag, include_removable: bool) {
 }
 
 #[cfg(windows)]
-mod real {
+mod real_windows {
     use super::CancelFlag;
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
@@ -119,9 +125,103 @@ mod real {
     }
 }
 
+/// macOS：启动盘固定为 `/`，可选包含 `/Volumes/*` 下的可移动盘。按 **Mach-O 魔数**
+/// 识别可执行文件——macOS 没有 `.exe` 扩展名概念，靠文件头魔数才是正确做法。
+#[cfg(target_os = "macos")]
+mod real_macos {
+    use super::CancelFlag;
+    use std::io::Read;
+    use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
+    use walkdir::WalkDir;
+
+    /// 遍历挂载点，收集所有 Mach-O 可执行文件路径。
+    pub fn walk(cancel: &CancelFlag, include_removable: bool) -> Vec<PathBuf> {
+        let roots = local_drive_roots(include_removable);
+        let mut paths = Vec::new();
+
+        'roots: for root in roots {
+            for entry in WalkDir::new(&root)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(|e| e.ok())
+            {
+                if cancel.load(Ordering::SeqCst) {
+                    break 'roots;
+                }
+                let path = entry.path();
+                // 跳过不该扫的镜像/其它挂载，避免重复扫描或无意义 I/O。
+                if is_excluded(path, include_removable) {
+                    continue;
+                }
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                // 实时读文件头判断是不是 Mach-O，避免把数百万个普通文件都塞进待扫列表。
+                if !is_macho_file(path) {
+                    continue;
+                }
+                paths.push(path.to_path_buf());
+            }
+        }
+        paths
+    }
+
+    /// 判断某个路径是否属于"不应纳入全盘扫描"的子树：
+    /// - `/System/Volumes`：`/` 的数据卷镜像，firmlink 已经把 `/Users`、`/Applications`
+    ///   等呈现到 `/` 下，再走一遍会重复扫描同一批文件。
+    /// - 不包含可移动盘时：`/Volumes`、`/Network` 下的其它挂载点也不要扫。
+    fn is_excluded(path: &std::path::Path, include_removable: bool) -> bool {
+        if path.strip_prefix("/System/Volumes").is_ok() {
+            return true;
+        }
+        if !include_removable && (path.starts_with("/Volumes") || path.starts_with("/Network")) {
+            return true;
+        }
+        false
+    }
+
+    /// 枚举磁盘根目录：macOS 启动盘永远是 `/`；可移动盘挂在 `/Volumes/` 下。
+    fn local_drive_roots(include_removable: bool) -> Vec<PathBuf> {
+        let mut roots = vec![PathBuf::from("/")];
+        if include_removable {
+            if let Ok(entries) = std::fs::read_dir("/Volumes") {
+                for e in entries.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        roots.push(p);
+                    }
+                }
+            }
+        }
+        roots
+    }
+
+    /// 读文件头 4 字节判断是否是 Mach-O（含 fat/universal 二进制）。
+    fn is_macho_file(path: &std::path::Path) -> bool {
+        let mut f = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let mut magic = [0u8; 4];
+        if f.read_exact(&mut magic).is_err() {
+            return false;
+        }
+        matches!(
+            magic,
+            [0xFE, 0xED, 0xFA, 0xCE] | // MH_MAGIC（32 位）
+            [0xCE, 0xFA, 0xED, 0xFE] | // MH_CIGAM
+            [0xFE, 0xED, 0xFA, 0xCF] | // MH_MAGIC_64
+            [0xCF, 0xFA, 0xED, 0xFE] | // MH_CIGAM_64
+            [0xCA, 0xFE, 0xBA, 0xBE] | // FAT_MAGIC（universal）
+            [0xBE, 0xBA, 0xFE, 0xCA]   // FAT_CIGAM
+        )
+    }
+}
+
 /// 开发预览用的假全盘扫描：不碰真实文件系统，直接生成一批"看起来像 Windows 路径"
 /// 的假数据。生成本身很快，实际扫描节奏由（同样是 mock 的）engine 那边控制。
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 mod mock {
     use super::CancelFlag;
     use std::path::PathBuf;

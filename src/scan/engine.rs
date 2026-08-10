@@ -1,13 +1,20 @@
 //! ClamAV 调用封装：闪电扫描和全盘扫描共用这一份逻辑。
 //!
 //! 设计要点（对应技术方案 3.3 节）：
-//! - 只 spawn 一次 `clamscan.exe`，用 `--file-list=<临时文件>` 传入待扫描路径。
+//! - 只 spawn 一次 `clamscan`，用 `--file-list=<临时文件>` 传入待扫描路径。
 //!   ClamAV 1.5.x 不支持 `--file-list=-`（stdin），必须用实际文件。
 //! - 用 `-v` + `--stdout` 让 clamscan 对每个文件都输出一行结果到 stdout，从而拿到逐文件级进度。
 //! - 取消扫描：一个"看门狗"线程检测到取消标记后直接 kill 子进程，stdout 管道关闭后读取循环自然退出。
 //!
-//! 非 Windows（macOS/Linux 开发机预览）：没有 clamscan.exe 可跑，`mock` 子模块用同样的
-//! `Vec<PathBuf> -> ScanEvent` 接口模拟扫描过程，方便在开发机上直接看 UI/交互效果。
+//! 平台差异只在"怎么叫起 clamscan"这一段，扫描编排逻辑（临时文件、stdout 解析、
+//! 看门狗、基因缓存、签名预筛）是完全共享的：
+//! - Windows 调 `clamscan.exe`，并加 `CREATE_NO_WINDOW` 避免弹出黑框，`--scan-pe=yes`。
+//! - macOS 调 `clamscan`（系统安装 / 随包内置 / PATH 兜底），无 `creation_flags`，`--scan-pe=no`
+//!   （macOS 没有 PE，Mach-O 由 ClamAV 单独解析，不受此开关影响）。
+//! - 病毒库目录通过 `paths::resolved_clamav_database_dir()` 显式传给 `--database=`，
+//!   优先用内置/系统安装/用户级 `~/.clamav`，不依赖 clamscan 编译期默认目录。
+//! - 其它（Linux 等开发机预览）：`mock` 用同样的 `Vec<PathBuf> -> ScanEvent` 接口
+//!   模拟扫描过程，方便在开发机上直接看 UI/交互效果。
 
 use super::{CancelFlag, ScanEvent};
 use std::path::PathBuf;
@@ -17,13 +24,13 @@ use std::sync::mpsc::Sender;
 ///
 /// 这个函数是阻塞的，调用者需要自己在后台线程里跑它。
 pub fn run(paths: Vec<PathBuf>, tx: Sender<ScanEvent>, cancel: CancelFlag) {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     real::run(paths, tx, cancel);
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     mock::run(paths, tx, cancel);
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod real {
     use super::super::authenticode;
     use super::super::cache;
@@ -31,7 +38,6 @@ mod real {
     use crate::paths;
     use std::collections::HashMap;
     use std::io::{BufRead, BufReader, Write};
-    use std::os::windows::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,7 +45,12 @@ mod real {
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
-    /// 不弹出黑色命令行窗口。
+    // `creation_flags` 只在 Windows 上有意义；非 Windows 构建不需要这个 trait，门控掉避免 unused import。
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
+
+    /// 不弹出黑色命令行窗口（仅 Windows 有意义）。
+    #[cfg(windows)]
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     pub fn run(paths: Vec<PathBuf>, tx: Sender<ScanEvent>, cancel: CancelFlag) {
@@ -49,7 +60,7 @@ mod real {
 
         if !paths::clamscan_available() {
             let _ = tx.send(ScanEvent::Error(format!(
-                "Scan engine not found: {}\nMake sure the clamav directory is bundled with the app.",
+                "Scan engine not found: {}\nMake sure ClamAV is installed (or bundled in the clamav/ directory).",
                 paths::clamscan_path().display()
             )));
             let _ = tx.send(ScanEvent::Finished {
@@ -74,8 +85,14 @@ mod real {
         const CACHE_SKIP_SIZE: u64 = 64 * 1024 * 1024;
         let cache_path = paths::app_data_dir().join("scan_cache.tsv");
         paths::ensure_dir(&paths::app_data_dir());
+        // 解析真实可用的病毒库目录：缓存以"所用库目录 + 版本"为身份，库变了自动失效。
+        // 没有可用库目录时退回内置路径（此时扫描多半会因 clamscan 找不到库而报错，属正常拦截）。
+        let resolved_db = paths::resolved_clamav_database_dir();
+        let effective_db = resolved_db
+            .clone()
+            .unwrap_or_else(|| paths::clamav_database_dir());
         // 缓存不可用不会阻断扫描：open 内部失败会退化为空缓存，insert 失败也会静默忽略。
-        let mut cache = cache::ScanCache::open(&cache_path, &paths::clamav_database_dir());
+        let mut cache = cache::ScanCache::open(&cache_path, &effective_db);
 
         // 预筛：能命中有效缓存的文件直接判结果并跳过 ClamAV；其余交给 ClamAV 扫。
         let mut to_scan: Vec<PathBuf> = Vec::new();
@@ -99,9 +116,9 @@ mod real {
                         });
                         continue;
                     }
-                    // 基因缓存未命中：PE 文件先跑 Authenticode 预筛。可信签名的文件
+                    // 基因缓存未命中：可信签名文件先跑签名预筛。签名有效的文件
                     // 直接判干净并跳过 ClamAV（首扫就见效），同时把结果写回基因缓存，
-                    // 下次连 WinVerifyTrust 都不用再跑。
+                    // 下次连签名校验都不用再跑。
                     if authenticode::is_trusted_signed(p) {
                         scanned += 1;
                         let _ = tx.send(ScanEvent::FileScanned {
@@ -139,41 +156,18 @@ mod real {
         cmd.arg("--no-summary")
             .arg("-v")
             .arg("--stdout")
-            .arg(format!("--file-list={}", temp_path.display()))
-            .arg(format!(
-                "--database={}",
-                paths::clamav_database_dir().display()
-            ))
-            // ── 扫描速度优化（关键）──
-            // 目标文件都是 PE 可执行文件（exe/dll/sys 等）。ClamAV 默认开启的 bytecode
-            // 签名会对每个可疑 PE 做 JIT 编译 + 模拟执行解包，单文件能跑到 2~5 秒，
-            // 是慢扫的主因。关闭后单文件通常回落到 100~300ms，代价是丢失 bytecode
-            // 签名检测能力（对常见 PE 检出影响有限，可接受）。
-            // DB 加载的 10~30 秒固定开销无法在此消除，但单文件扫描时间可显著降低。
-            // 保留：--scan-pe（核心需求）、--scan-ole2（部分 PE 内嵌 OLE 容器）。
-            .arg("--scan-elf=no")        // 不扫 ELF（Linux 可执行文件）
-            .arg("--scan-archive=no")    // 不扫压缩包（目标是独立 exe/dll，非自解压包）
-            .arg("--scan-mail=no")       // 不扫邮件
-            .arg("--scan-pdf=no")        // 不扫 PDF
-            .arg("--scan-html=no")       // 不扫 HTML
-            .arg("--scan-xmldocs=no")    // 不扫 XML 文档
-            .arg("--scan-swf=no")        // 不扫 Flash
-            .arg("--scan-hwp3=no")       // 不扫韩文办公文档
-            .arg("--scan-onenote=no")    // 不扫 OneNote
-            .arg("--scan-image=no")      // 不扫图片
-            .arg("--scan-image-fuzzy-hash=no") // 不做图片模糊哈希
-            .arg("--phishing-sigs=no")   // 不做钓鱼签名检测（针对邮件）
-            .arg("--phishing-scan-urls=no")    // 不做 URL 钓鱼检测
-            // ── 单文件耗时杀手：bytecode + PUA ──
-            .arg("--bytecode=no")        // 关闭字节码签名（JIT 编译+模拟执行，单文件最多 5s）
-            .arg("--detect-pua=no")      // 不检测"潜在不需要的应用"，省一遍 PUA 签名匹配
-            // 大小与超时限制：跳过过大的文件、限制单文件扫描时间。
-            .arg("--max-filesize=100M")       // 超过 100MB 的文件跳过（视为干净）
-            .arg("--max-scansize=200M")       // 容器文件最大扫描数据量
-            .arg("--max-scantime=5000")       // 单文件扫描超时上限 5 秒，超时则判为干净（避免个别文件拖垮整体）
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .creation_flags(CREATE_NO_WINDOW);
+            .arg(format!("--file-list={}", temp_path.display()));
+        // 显式指定病毒库目录：解析到真实存在的库（内置/系统安装/用户级 ~/.clamav），
+        // 避免依赖 clamscan 的编译期默认目录（开发机上往往为空或 root 所有无权限）。
+        // 解析不到任何库目录时就不传该参数，让 clamscan 退回到自身默认目录（通常也会报错被正常拦截）。
+        if let Some(db) = &resolved_db {
+            cmd.arg(format!("--database={}", db.display()));
+        }
+        // 速度优化相关的扫描开关（按平台微调 PE 解析）统一加在这里。
+        apply_scan_flags(&mut cmd);
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -236,9 +230,9 @@ mod real {
 
         // 读取线程（就用当前线程）：逐行解析 clamscan 的 stdout。
         // 输出形如：
-        //   Scanning C:\path\to\file.exe        ← -v 的进度提示，不含 ": "，会被 rsplit 过滤掉
-        //   C:\path\to\file.exe: OK             ← 正常
-        //   C:\path\to\file.exe: Win.Test.EICAR_HDB-1 FOUND  ← 感染
+        //   Scanning /path/to/file        ← -v 的进度提示，不含 ": "，会被 rsplit 过滤掉
+        //   /path/to/file: OK             ← 正常
+        //   /path/to/file: Win.Test.EICAR_HDB-1 FOUND  ← 感染
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
             let Ok(line) = line else { break };
@@ -292,11 +286,11 @@ mod real {
         Ok(())
     }
 
-    /// clamscan 一行输出形如 `C:\path\to\file.exe: OK` 或
-    /// `C:\path\to\file.exe: Win.Test.EICAR_HDB-1 FOUND`。
-    /// Windows 路径本身含有一个 `X:` 但后面紧跟 `\`，不会产生 `: `（冒号+空格），
-    /// 所以从右边找 `: ` 分隔符是安全的。
-    /// `Scanning <path>` 这类 `-v` 提示行不含 `: `，会被 `None` 过滤掉。
+    /// clamscan 一行输出形如 `/path/to/file: OK` 或
+    /// `/path/to/file: Win.Test.EICAR_HDB-1 FOUND`。
+    /// 用 `rsplit_once(": ")` 找最后一个 "冒号+空格" 作为状态分隔符是安全的：
+    /// 路径本身（macOS 用 `/`、Windows 用 `X:\`）不含状态分隔所需的 "colon+space"，
+    /// 而 `-v` 的 `Scanning <path>` 提示行没有 ": " 会被过滤掉。
     fn rsplit_result_line(line: &str) -> Option<(&str, &str)> {
         line.rsplit_once(": ")
     }
@@ -309,11 +303,42 @@ mod real {
             status.strip_suffix(" FOUND").map(|name| name.to_string())
         }
     }
+
+    /// 速度优化相关的扫描开关。跳过与可执行文件无关的格式，并对 PE 解析按平台微调。
+    fn apply_scan_flags(cmd: &mut Command) {
+        // 关闭 bytecode（单文件耗时杀手：JIT 编译+模拟执行，最多 5s）与 PUA 签名匹配。
+        cmd.arg("--scan-elf=no") // 不扫 ELF（macOS/Linux 可执行文件由各自解析器处理）
+            .arg("--scan-archive=no") // 目标是独立可执行文件，非自解压包
+            .arg("--scan-mail=no")
+            .arg("--scan-pdf=no")
+            .arg("--scan-html=no")
+            .arg("--scan-xmldocs=no")
+            .arg("--scan-swf=no")
+            .arg("--scan-hwp3=no")
+            .arg("--scan-onenote=no")
+            .arg("--scan-image=no")
+            .arg("--scan-image-fuzzy-hash=no")
+            .arg("--phishing-sigs=no")
+            .arg("--phishing-scan-urls=no")
+            .arg("--bytecode=no")
+            .arg("--detect-pua=no")
+            // 大小与超时限制：跳过过大的文件、限制单文件扫描时间。
+            .arg("--max-filesize=100M")
+            .arg("--max-scansize=200M")
+            .arg("--max-scantime=5000"); // 单文件扫描超时上限 5 秒，超时则判为干净（避免个别文件拖垮整体）
+
+        // PE 解析：Windows 目标就是 PE，开启；macOS 没有 PE，关掉省一次解析开销
+        // （Mach-O 由 ClamAV 单独的解析器处理，不受 --scan-pe 开关影响）。
+        #[cfg(windows)]
+        cmd.arg("--scan-pe=yes");
+        #[cfg(target_os = "macos")]
+        cmd.arg("--scan-pe=no");
+    }
 }
 
 /// 开发预览用的假扫描引擎：不碰真实文件，只是按小延迟消费路径列表，
-/// 模拟"逐个文件扫完"的节奏，方便在 macOS/Linux 开发机上看 UI 动起来的效果。
-#[cfg(not(windows))]
+/// 模拟"逐个文件扫完"的节奏，方便在 Linux 等开发机上看 UI 动起来的效果。
+#[cfg(not(any(windows, target_os = "macos")))]
 mod mock {
     use super::super::{CancelFlag, ScanEvent};
     use std::path::PathBuf;

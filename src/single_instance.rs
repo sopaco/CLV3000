@@ -1,12 +1,18 @@
-//! 单实例保护：用一个具名 Mutex 防止程序被多次启动。
-//! 拿到的 HANDLE 故意不 close——让它随进程退出自动释放即可。
+//! 单实例保护：保证同时只有一个 CLV3000 在跑。
 //!
-//! 非 Windows（macOS/Linux 开发机预览用）：具名 Mutex 是 Win32 概念，这里直接放行，
-//! 不做单实例限制——反正只是拿来看 UI，不是真的部署场景。
+//! 平台实现：
+//! - Windows：具名 Mutex（`Global\CLV3000_SingleInstance_Mutex`），拿到的 HANDLE 故意不
+//!   close，让它随进程退出自动释放。
+//! - macOS（及其它 Unix）：在 `app_data_dir` 下绑定一个 Unix 域 socket
+//!   `clv3000.sock`。绑定成功即拿到锁；若文件已存在，先尝试连一下——连得上说明
+//!   上一个实例还活着（本实例应退出），连不上说明是崩溃残留的僵尸 socket，删掉重绑。
+//! - 其它（Linux 等开发机预览用）：直接放行，不做单实例限制——反正只是拿来看 UI。
 
 #[cfg(windows)]
 pub use real::acquire;
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub use macos::acquire;
+#[cfg(not(any(windows, target_os = "macos")))]
 pub use mock::acquire;
 
 #[cfg(windows)]
@@ -36,7 +42,45 @@ mod real {
     }
 }
 
-#[cfg(not(windows))]
+/// macOS / Unix：用 Unix 域 socket 充当文件锁。绑定成功 = 拿到锁。
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    const SOCK_NAME: &str = "clv3000.sock";
+
+    /// 如果已经有一个实例在跑，返回 `false`（调用者应该直接退出）。
+    pub fn acquire() -> bool {
+        let dir = crate::paths::app_data_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let sock = dir.join(SOCK_NAME);
+
+        match UnixListener::bind(&sock) {
+            Ok(listener) => {
+                // 持有 listener 到进程退出（Drop 释放 socket 文件）。用 forget 让它活到进程结束。
+                std::mem::forget(listener);
+                true
+            }
+            Err(_) => {
+                // socket 文件已存在：连一下判断上一个实例是否还活着。
+                if UnixStream::connect(&sock).is_ok() {
+                    return false; // 上一个实例还活着 → 本实例退出
+                }
+                // 连不上 = 僵尸 socket（崩溃残留）→ 删掉重绑一次。
+                let _ = std::fs::remove_file(&sock);
+                match UnixListener::bind(&sock) {
+                    Ok(listener) => {
+                        std::mem::forget(listener);
+                        true
+                    }
+                    Err(_) => false,
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod mock {
     pub fn acquire() -> bool {
         true

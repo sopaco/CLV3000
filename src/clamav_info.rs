@@ -1,7 +1,6 @@
 //! 查询内置 ClamAV 引擎与病毒库版本信息（供「关于」对话框展示）。
 
 use crate::paths;
-#[cfg(windows)]
 use std::process::Command;
 
 #[derive(Debug, Clone)]
@@ -67,7 +66,26 @@ fn run_clamscan_version_flag() -> Result<String, String> {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn run_clamscan_version_flag() -> Result<String, String> {
+    let output = Command::new(paths::clamscan_path())
+        .arg("-V")
+        .output()
+        .map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stdout.is_empty() {
+        Ok(stdout)
+    } else if !stderr.is_empty() {
+        Ok(stderr)
+    } else if output.status.success() {
+        Ok(String::new())
+    } else {
+        Err(format!("exit {}", output.status))
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn run_clamscan_version_flag() -> Result<String, String> {
     Ok("ClamAV 0.7.0 (dev preview)/10001/Thu Jan  1 00:00:00 2031".to_string())
 }

@@ -4,9 +4,13 @@
 //! 权限说明：部分系统/受保护进程在普通用户权限下打不开或枚举不到模块，
 //! 这里直接跳过并计入统计，不会阻塞整体流程——不是 bug。
 //!
-//! 非 Windows（macOS/Linux 开发机预览）：`Toolhelp32` 这套 API 是 Windows 独有的，
-//! `mock` 子模块用程序生成的假进程/模块列表替代，数量级贴近实际 Windows 机器
-//! （几百个进程、上千个去重后的 DLL），方便直接看 UI 效果。
+//! 平台实现：
+//! - Windows：用 `Toolhelp32` 拍进程/模块快照（`real_windows`）。
+//! - macOS：用已依赖的 `sysinfo` 枚举进程并取主可执行文件路径（`real_macos`）。
+//!   进程主 exe 即"正在运行的二进制"，是闪电扫描最该查的对象；逐进程 dylib
+//!   枚举需要用 `libproc`，留作后续增强。
+//! - 其它（Linux 等开发机预览）：`mock` 用程序生成的假进程/模块列表替代，
+//!   数量级贴近真实机器，方便直接看 UI 效果。
 
 use super::engine;
 use super::{CancelFlag, ScanEvent};
@@ -16,9 +20,10 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
 
 #[cfg(windows)]
-use real::{modules_of_process, snapshot_pids};
-
-#[cfg(not(windows))]
+use real_windows::{modules_of_process, snapshot_pids};
+#[cfg(target_os = "macos")]
+use real_macos::{modules_of_process, snapshot_pids};
+#[cfg(not(any(windows, target_os = "macos")))]
 use mock::{modules_of_process, snapshot_pids};
 
 /// 阻塞执行，调用者需要自己 spawn 一个线程来跑它。
@@ -75,7 +80,7 @@ pub fn run(tx: Sender<ScanEvent>, cancel: CancelFlag) {
 }
 
 #[cfg(windows)]
-mod real {
+mod real_windows {
     use std::path::PathBuf;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -146,8 +151,41 @@ mod real {
     }
 }
 
-/// 开发预览用的假进程/模块数据源，数量级贴近真实 Windows 机器上闪电扫描能看到的规模。
-#[cfg(not(windows))]
+/// macOS：用 sysinfo 枚举进程。一次 refresh 后的快照缓存在模块级 Mutex 里，
+/// 供本线程内后续 `modules_of_process` 复用，避免每个进程都重新 refresh 全进程表。
+#[cfg(target_os = "macos")]
+mod real_macos {
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    use sysinfo::{Pid, System};
+
+    static SNAPSHOT: Mutex<Option<System>> = Mutex::new(None);
+
+    pub fn snapshot_pids() -> Vec<u32> {
+        let mut sys = System::new();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        let pids: Vec<u32> = sys.processes().keys().map(|p| p.as_u32()).collect();
+        *SNAPSHOT.lock().unwrap() = Some(sys);
+        pids
+    }
+
+    /// 取某进程的主可执行文件路径。拿不到（已退出 / 无权限 / 无 exe）就返回空列表。
+    pub fn modules_of_process(pid: u32) -> Vec<PathBuf> {
+        let sys = SNAPSHOT.lock().unwrap();
+        let target = Pid::from_u32(pid);
+        match sys.as_ref().and_then(|s| s.process(target)) {
+            Some(proc) => match proc.exe() {
+                Some(path) if !path.as_os_str().is_empty() => vec![path.to_path_buf()],
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        }
+    }
+}
+
+/// 开发预览用的假进程/模块数据源，数量级贴近真实机器上闪电扫描能看到的规模。
+#[cfg(not(any(windows, target_os = "macos")))]
 mod mock {
     use std::path::PathBuf;
 
