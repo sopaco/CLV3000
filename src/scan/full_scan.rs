@@ -16,41 +16,71 @@ use super::engine;
 use super::{CancelFlag, ScanEvent};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
+use std::time::Instant;
+
+/// walk 过程中向 UI 汇报进度的最小间隔（文件数），避免 channel 被刷爆。
+const WALK_PROGRESS_STEP: usize = 100;
+
+fn report_walk_progress(tx: &Sender<ScanEvent>, files_found: usize, last_reported: &mut usize) {
+    if files_found == 0 {
+        return;
+    }
+    if *last_reported == 0 || files_found >= *last_reported + WALK_PROGRESS_STEP {
+        let _ = tx.send(ScanEvent::WalkProgress { files_found });
+        *last_reported = files_found;
+    }
+}
 
 /// 阻塞执行，调用者需要自己 spawn 一个线程来跑它。
 pub fn run(tx: Sender<ScanEvent>, cancel: CancelFlag, include_removable: bool) {
+    let start = Instant::now();
     // mock::walk 不需要这个参数——只有真实 walk（真的枚举磁盘）才关心是否包含可移动盘。
     #[cfg(not(any(windows, target_os = "macos")))]
     let _ = include_removable;
 
-    // 1. 遍历磁盘，收集所有待扫文件路径。
-    //    全盘扫描不知道总数（遍历完才知道），所以 total 传 None，UI 显示"已扫描 N 个"而非百分比。
+    // 1. 遍历磁盘，收集所有待扫文件路径（期间发 WalkProgress 驱动 UI）。
     #[cfg(windows)]
-    let paths = real_windows::walk(&cancel, include_removable);
+    let paths = real_windows::walk(&tx, &cancel, include_removable);
     #[cfg(target_os = "macos")]
-    let paths = real_macos::walk(&cancel, include_removable);
+    let paths = real_macos::walk(&tx, &cancel, include_removable);
     #[cfg(not(any(windows, target_os = "macos")))]
-    let paths = mock::walk(&cancel);
+    let paths = mock::walk(&tx, &cancel);
 
     if cancel.load(Ordering::SeqCst) {
         let _ = tx.send(ScanEvent::Finished {
             scanned: 0,
-            elapsed: std::time::Duration::ZERO,
+            elapsed: start.elapsed(),
             cancelled: true,
         });
         return;
     }
 
-    // 2. 交给 engine 扫描。tx 的所有权在此转移给 engine。
-    //    全盘扫描的 phase 已经在 start() 里设成 Scanning 了（和闪电扫描不同，不需要 ScanStarted）。
+    let total_files = paths.len();
+    if total_files == 0 {
+        let _ = tx.send(ScanEvent::Finished {
+            scanned: 0,
+            elapsed: start.elapsed(),
+            cancelled: false,
+        });
+        return;
+    }
+
+    // 与闪电扫描一致：walk 完成、总数已知后再切到带百分比的扫描 UI。
+    let _ = tx.send(ScanEvent::ScanStarted {
+        total: Some(total_files),
+    });
+
+    // 2. 交给 engine 扫描。
     engine::run(paths, tx, cancel);
 }
 
 #[cfg(windows)]
 mod real_windows {
     use super::CancelFlag;
+    use super::{report_walk_progress, ScanEvent};
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
+    use std::sync::mpsc::Sender;
     use walkdir::WalkDir;
 
     /// 参与扫描的可执行文件扩展名白名单（大小写不敏感）。
@@ -62,9 +92,14 @@ mod real_windows {
     const DRIVE_REMOVABLE: u32 = 2;
 
     /// 遍历本地磁盘，收集所有匹配白名单扩展名的文件路径。
-    pub fn walk(cancel: &CancelFlag, include_removable: bool) -> Vec<PathBuf> {
+    pub fn walk(
+        tx: &Sender<ScanEvent>,
+        cancel: &CancelFlag,
+        include_removable: bool,
+    ) -> Vec<PathBuf> {
         let roots = local_drive_roots(include_removable);
         let mut paths = Vec::new();
+        let mut last_reported = 0usize;
 
         'roots: for root in roots {
             for entry in WalkDir::new(&root)
@@ -82,8 +117,10 @@ mod real_windows {
                     continue;
                 }
                 paths.push(entry.path().to_path_buf());
+                report_walk_progress(tx, paths.len(), &mut last_reported);
             }
         }
+        report_walk_progress(tx, paths.len(), &mut last_reported);
         paths
     }
 
@@ -130,15 +167,22 @@ mod real_windows {
 #[cfg(target_os = "macos")]
 mod real_macos {
     use super::CancelFlag;
+    use super::{report_walk_progress, ScanEvent};
     use std::io::Read;
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
+    use std::sync::mpsc::Sender;
     use walkdir::WalkDir;
 
     /// 遍历挂载点，收集所有 Mach-O 可执行文件路径。
-    pub fn walk(cancel: &CancelFlag, include_removable: bool) -> Vec<PathBuf> {
+    pub fn walk(
+        tx: &Sender<ScanEvent>,
+        cancel: &CancelFlag,
+        include_removable: bool,
+    ) -> Vec<PathBuf> {
         let roots = local_drive_roots(include_removable);
         let mut paths = Vec::new();
+        let mut last_reported = 0usize;
 
         'roots: for root in roots {
             for entry in WalkDir::new(&root)
@@ -162,8 +206,10 @@ mod real_macos {
                     continue;
                 }
                 paths.push(path.to_path_buf());
+                report_walk_progress(tx, paths.len(), &mut last_reported);
             }
         }
+        report_walk_progress(tx, paths.len(), &mut last_reported);
         paths
     }
 
@@ -224,8 +270,10 @@ mod real_macos {
 #[cfg(not(any(windows, target_os = "macos")))]
 mod mock {
     use super::CancelFlag;
+    use super::{report_walk_progress, ScanEvent};
     use std::path::PathBuf;
     use std::sync::atomic::Ordering;
+    use std::sync::mpsc::Sender;
 
     const APP_NAMES: &[&str] = &[
         "Chrome", "Office", "Adobe", "Steam", "Zoom", "Slack", "VSCode", "Docker", "Python",
@@ -233,15 +281,17 @@ mod mock {
     ];
     const EXTENSIONS: &[&str] = &["exe", "dll", "sys"];
 
-    pub fn walk(cancel: &CancelFlag) -> Vec<PathBuf> {
+    pub fn walk(tx: &Sender<ScanEvent>, cancel: &CancelFlag) -> Vec<PathBuf> {
         const TOTAL: usize = 3000;
         let mut paths = Vec::with_capacity(TOTAL + 1);
+        let mut last_reported = 0usize;
 
         // 保证至少有一个"看起来可疑"的路径，方便预览威胁卡片 UI（是否真的被
         // 标红取决于 engine mock 那边这一轮是不是"该翻到有威胁的一面"）。
         paths.push(PathBuf::from(
             r"C:\Users\Alice\Downloads\setup_crack_v2.exe",
         ));
+        report_walk_progress(tx, paths.len(), &mut last_reported);
 
         for i in 0..TOTAL {
             if cancel.load(Ordering::SeqCst) {
@@ -252,7 +302,9 @@ mod mock {
             paths.push(PathBuf::from(format!(
                 r"C:\Program Files\{app}\bin\module_{i}.{ext}"
             )));
+            report_walk_progress(tx, paths.len(), &mut last_reported);
         }
+        report_walk_progress(tx, paths.len(), &mut last_reported);
         paths
     }
 }

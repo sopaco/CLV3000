@@ -39,11 +39,13 @@ pub enum ScanEvent {
         files_found: usize,
     },
     /// 枚举完成、clamscan 即将启动（或已启动但还在加载病毒库、尚未产出结果）。
-    /// 闪电扫描枚举完就知道文件总数了；全盘扫描不发这个事件，phase 直接从 Idle 跳到 Scanning。
-    /// 之所以单独发一个事件：clamscan 加载病毒库通常要十几秒，期间一个 FileScanned 都不会来，
-    /// 没有 ScanStarted 的话 UI 会一直停在 "Enumerating N/N processes" 看起来卡住。
+    /// 闪电扫描在进程枚举后发送；全盘扫描在磁盘 walk 结束后发送（带文件总数）。
     ScanStarted {
         total: Option<usize>,
+    },
+    /// 全盘扫描磁盘遍历中：已发现的可扫文件数（walk 完成前总数未知，靠此驱动 UI）。
+    WalkProgress {
+        files_found: usize,
     },
     /// clamscan 已启动、病毒库加载中；尚有 `remaining` 个文件待在引擎内扫描。
     /// 不切换 UI 阶段，进度仍随 `FileScanned` / `ScanningFile` 推进。

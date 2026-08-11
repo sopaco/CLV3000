@@ -72,6 +72,8 @@ struct ScanPageState {
     engine_loading: bool,
     /// `EngineLoading` 携带的待引擎扫描文件数（仅用于状态行提示）。
     engine_loading_remaining: usize,
+    /// 全盘扫描磁盘 walk 阶段已发现的可扫文件数。
+    walk_files_found: usize,
     /// clamscan `-v` 的 `Scanning <path>` 行：当前正在引擎内检测的文件。
     engine_scanning_path: Option<String>,
 }
@@ -89,6 +91,7 @@ impl ScanPageState {
             content_height: 0.0,
             engine_loading: false,
             engine_loading_remaining: 0,
+            walk_files_found: 0,
             engine_scanning_path: None,
         }
     }
@@ -109,6 +112,7 @@ impl ScanPageState {
         self.started_at = Some(Instant::now());
         self.engine_loading = false;
         self.engine_loading_remaining = 0;
+        self.walk_files_found = 0;
         self.engine_scanning_path = None;
         let cancel = scan::new_cancel_flag();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -173,11 +177,15 @@ impl ScanPageState {
                     self.engine_loading = false;
                     self.engine_loading_remaining = 0;
                     self.engine_scanning_path = None;
+                    self.walk_files_found = 0;
                     self.phase = ScanPhase::Scanning {
                         total,
                         scanned: 0,
                         current_path: String::new(),
                     };
+                }
+                ScanEvent::WalkProgress { files_found } => {
+                    self.walk_files_found = files_found;
                 }
                 ScanEvent::EngineLoading { remaining } => {
                     self.engine_loading = true;
@@ -367,8 +375,8 @@ fn run_freshclam() -> Result<UpdateOutcome, String> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    let db_dir = paths::resolved_clamav_database_dir()
-        .unwrap_or_else(|| paths::clamav_database_dir());
+    let db_dir =
+        paths::resolved_clamav_database_dir().unwrap_or_else(|| paths::clamav_database_dir());
     // 跑之前先记一份数据库目录签名，跑完再比对——freshclam 在"已是最新"时
     // 也返回退出码 0，光看退出码会把"没变化"误判成"更新成功"。
     let before = database_signature(&db_dir);
@@ -393,9 +401,15 @@ fn run_freshclam() -> Result<UpdateOutcome, String> {
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             if stderr.is_empty() {
-                Err(format!("Database update failed with exit code {}", out.status))
+                Err(format!(
+                    "Database update failed with exit code {}",
+                    out.status
+                ))
             } else {
-                Err(format!("Database update failed (exit {}): {}", out.status, stderr))
+                Err(format!(
+                    "Database update failed (exit {}): {}",
+                    out.status, stderr
+                ))
             }
         }
         Err(e) => Err(format!("Failed to start freshclam: {e}")),
@@ -439,8 +453,8 @@ fn database_signature(dir: &std::path::Path) -> String {
 fn run_freshclam() -> Result<UpdateOutcome, String> {
     use std::process::{Command, Stdio};
 
-    let db_dir = paths::resolved_clamav_database_dir()
-        .unwrap_or_else(|| paths::clamav_database_dir());
+    let db_dir =
+        paths::resolved_clamav_database_dir().unwrap_or_else(|| paths::clamav_database_dir());
     // 跑之前先记一份数据库目录签名，跑完再比对——freshclam 在"已是最新"时
     // 也返回退出码 0，光看退出码会把"没变化"误判成"更新成功"。
     let before = database_signature(&db_dir);
@@ -481,9 +495,15 @@ fn run_freshclam() -> Result<UpdateOutcome, String> {
                     Ok(UpdateOutcome::AlreadyUpToDate)
                 }
             } else if stderr_log.is_empty() {
-                Err(format!("Database update failed with exit code {}", out.status))
+                Err(format!(
+                    "Database update failed with exit code {}",
+                    out.status
+                ))
             } else {
-                Err(format!("Database update failed (exit {}): {}", out.status, stderr_log))
+                Err(format!(
+                    "Database update failed (exit {}): {}",
+                    out.status, stderr_log
+                ))
             }
         }
         Err(e) => {
@@ -515,7 +535,12 @@ fn run_freshclam() -> Result<UpdateOutcome, String> {
 /// `/tmp/clv3000_freshclam.log`，方便在 GUI 子进程里复现失败时拿到完整现场
 /// （GUI 跑的命令和终端里手敲的偶尔会因环境不同而出错，光看弹窗里的简短报错不够）。
 #[cfg(target_os = "macos")]
-fn debug_log_freshclam(args: &[String], result: &Result<UpdateOutcome, String>, stdout: &str, stderr: &str) {
+fn debug_log_freshclam(
+    args: &[String],
+    result: &Result<UpdateOutcome, String>,
+    stdout: &str,
+    stderr: &str,
+) {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -726,7 +751,10 @@ impl App {
             self.app_icon_texture = Some(load_texture(
                 ctx,
                 "app_icon",
-                crate::icon_data::load_app_icon_for_display(LOGO_DISPLAY_PT, ctx.pixels_per_point()),
+                crate::icon_data::load_app_icon_for_display(
+                    LOGO_DISPLAY_PT,
+                    ctx.pixels_per_point(),
+                ),
             ));
         }
         #[cfg(not(windows))]
@@ -823,7 +851,11 @@ impl App {
             // 指令，避免每帧都重置、干扰用户对主窗口的手动缩放。
             let intent = if about_open && about_standalone { 1 } else { 0 };
             if intent != self.size_intent {
-                let size = if intent == 1 { ABOUT_WINDOW_SIZE } else { MAIN_WINDOW_SIZE };
+                let size = if intent == 1 {
+                    ABOUT_WINDOW_SIZE
+                } else {
+                    MAIN_WINDOW_SIZE
+                };
                 ctx.send_viewport_cmd(ViewportCommand::InnerSize(size.into()));
                 self.size_intent = intent;
                 if intent == 1 {
@@ -913,11 +945,7 @@ impl eframe::App for App {
                 core.quick.is_running() || core.full.is_running()
             };
             if scan_running {
-                ctx.request_repaint_after(Duration::from_millis(if visible {
-                    250
-                } else {
-                    500
-                }));
+                ctx.request_repaint_after(Duration::from_millis(if visible { 250 } else { 500 }));
             }
         }
     }
@@ -1543,17 +1571,30 @@ fn scan_page(
                 scanned,
                 current_path,
             } => {
-                // 全盘扫描 walk 磁盘阶段：尚无文件总数与路径。
-                let disk_walking = total.is_none() && *scanned == 0 && current_path.is_empty();
+                // 全盘扫描 walk 阶段：total 尚为 None、尚无 FileScanned。
+                let disk_walking = state.kind == ScanKind::Full
+                    && total.is_none()
+                    && *scanned == 0
+                    && current_path.is_empty();
 
                 let percent = if disk_walking {
                     None
                 } else {
-                    total.map(|t| if t == 0 { 1.0 } else { *scanned as f32 / t as f32 })
+                    total.map(|t| {
+                        if t == 0 {
+                            1.0
+                        } else {
+                            *scanned as f32 / t as f32
+                        }
+                    })
                 };
 
                 let title_text = if disk_walking {
-                    "Starting".to_string()
+                    if state.walk_files_found > 0 {
+                        state.walk_files_found.to_string()
+                    } else {
+                        "…".to_string()
+                    }
                 } else {
                     percent
                         .map(|p| format!("{:.0}%", p * 100.0))
@@ -1561,6 +1602,8 @@ fn scan_page(
                 };
 
                 let heading = if disk_walking {
+                    format!("Preparing {title}")
+                } else if *scanned == 0 && current_path.is_empty() && state.engine_loading {
                     format!("Starting {title}")
                 } else {
                     format!("Running {title}")
@@ -1574,13 +1617,26 @@ fn scan_page(
                     percent,
                     ring_color,
                     &title_text,
-                    if disk_walking { "scan engine" } else { "" },
+                    if disk_walking {
+                        "inspect files"
+                    } else if *scanned == 0 && current_path.is_empty() && state.engine_loading {
+                        "scan engine"
+                    } else {
+                        ""
+                    },
                 );
                 ui.add_space(4.0);
                 let status_line = if let Some(p) = &state.engine_scanning_path {
                     truncate(p, 60)
                 } else if disk_walking {
-                    "Preparing scan…".to_string()
+                    if state.walk_files_found > 0 {
+                        format!(
+                            "Finding key files on disk… {n} to scan",
+                            n = state.walk_files_found
+                        )
+                    } else {
+                        "Finding executables on disk…".to_string()
+                    }
                 } else if state.engine_loading && state.engine_loading_remaining > 0 {
                     format!(
                         "Loading scan engine ({remaining} files)…",
@@ -1603,15 +1659,22 @@ fn scan_page(
                 ui.add_space(4.0);
                 if let Some(started) = state.started_at.as_ref() {
                     ui.label(
-                        egui::RichText::new(format!("Elapsed {}", format_duration(started.elapsed())))
-                            .color(colors::TEXT_SECONDARY)
-                            .small(),
+                        egui::RichText::new(format!(
+                            "Elapsed {}",
+                            format_duration(started.elapsed())
+                        ))
+                        .color(colors::TEXT_SECONDARY)
+                        .small(),
                     );
                 }
                 ui.add_space(16.0);
-                let first_pill = match total {
-                    Some(t) => (format!("{scanned} / {t}"), "files"),
-                    None => (scanned.to_string(), "scanned"),
+                let first_pill = if disk_walking {
+                    (state.walk_files_found.to_string(), "to scan")
+                } else {
+                    match total {
+                        Some(t) => (format!("{scanned} / {t}"), "files"),
+                        None => (scanned.to_string(), "scanned"),
+                    }
                 };
                 widgets::centered_stat_pills(
                     ui,
@@ -1749,8 +1812,7 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
             "Scan engine not found"
         };
         let detail_dir = if available {
-            paths::resolved_clamav_database_dir()
-                .unwrap_or_else(|| paths::clamav_database_dir())
+            paths::resolved_clamav_database_dir().unwrap_or_else(|| paths::clamav_database_dir())
         } else {
             paths::clamav_dir()
         };
