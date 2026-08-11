@@ -170,10 +170,24 @@ pub fn database(painter: &Painter, rect: Rect, stroke: Stroke) {
     );
 }
 
-/// 汉堡菜单（三条横线），对应"全盘扫描"侧边栏入口。
-pub fn hamburger(painter: &Painter, rect: Rect, stroke: Stroke) {
-    for v in [0.28, 0.5, 0.72] {
-        painter.line_segment([map(rect, 0.12, v), map(rect, 0.88, v)], stroke);
+/// 硬盘图标：矩形机箱 + 左侧盘片圆 + 右侧接口线，表达"全盘/整盘扫描"。
+/// 刻意不用三条等距横线（易被读成汉堡菜单或面包屑）。
+pub fn hard_drive(painter: &Painter, rect: Rect, stroke: Stroke) {
+    let body: Vec<Pos2> = [(0.10, 0.28), (0.90, 0.28), (0.90, 0.72), (0.10, 0.72)]
+        .iter()
+        .map(|&(u, v)| map(rect, u, v))
+        .collect();
+    painter.add(polyline(&body, stroke, true));
+
+    let platter_center = map(rect, 0.34, 0.50);
+    let platter_r = rect.width() * 0.14;
+    painter.circle_stroke(platter_center, platter_r, stroke);
+    painter.circle_filled(platter_center, stroke.width * 0.85, stroke.color);
+
+    // 右侧 SATA 接口：竖线 + 三根短横线。
+    painter.line_segment([map(rect, 0.74, 0.34), map(rect, 0.74, 0.66)], stroke);
+    for v in [0.40, 0.50, 0.60] {
+        painter.line_segment([map(rect, 0.74, v), map(rect, 0.86, v)], stroke);
     }
 }
 

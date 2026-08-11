@@ -1165,7 +1165,7 @@ fn sidebar(ui: &mut egui::Ui, _ctx: &egui::Context, app: &mut App) {
         },
         SidebarItem {
             page: Page::FullScan,
-            draw: |p, r, s| icons::hamburger(p, r, s),
+            draw: |p, r, s| icons::hard_drive(p, r, s),
         },
         SidebarItem {
             page: Page::VirusDb,
@@ -1304,7 +1304,7 @@ fn dashboard_page(ui: &mut egui::Ui, _ctx: &egui::Context, app: &mut App) {
                     app.core.borrow_mut().quick.start(removable);
                 }
                 ui.add_space(BTN_GAP);
-                if action_button(ui, "Full Scan", icons::database) {
+                if action_button(ui, "Full Scan", icons::hard_drive) {
                     let removable = app.core.borrow().config.scan_removable_drives;
                     app.navigate(Page::FullScan);
                     app.core.borrow_mut().full.start(removable);
@@ -1454,7 +1454,7 @@ fn full_scan_page(ui: &mut egui::Ui, app: &mut App) {
         &mut app.toasts,
         "Full Scan",
         colors::ACCENT_BLUE,
-        icons::hamburger,
+        icons::hard_drive,
         true,
     );
 }
