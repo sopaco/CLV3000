@@ -70,14 +70,36 @@ pub fn shield(painter: &Painter, rect: Rect, stroke: Stroke, fill: Option<Color3
     painter.add(Shape::line(pts, PathStroke::from(stroke)));
 }
 
-/// 盾牌 + 中间一个勾选标记，仪表盘"安全"状态用。
-pub fn shield_check(painter: &Painter, rect: Rect, stroke: Stroke) {
-    shield(painter, rect, stroke, None);
-    let check: Vec<Pos2> = [(0.32, 0.52), (0.46, 0.68), (0.72, 0.34)]
+fn path_stroke(stroke: Stroke) -> PathStroke {
+    PathStroke::new(stroke.width, stroke.color)
+}
+
+/// 大圆环内的"安全"状态图形：半透明填充 + 高对比勾选，避免纯线框在大尺寸下显得空/单薄。
+pub fn status_glyph_secure(painter: &Painter, rect: Rect, color: Color32) {
+    const SHIELD_SCALE: f32 = 1.25;
+    let shield_rect = Rect::from_center_size(rect.center(), rect.size() * SHIELD_SCALE);
+
+    let body_fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 38);
+    let outline = Stroke::new(2.2, color);
+    shield(painter, shield_rect, outline, Some(body_fill));
+    let check: Vec<Pos2> = [(0.30, 0.50), (0.44, 0.66), (0.74, 0.32)]
         .iter()
         .map(|&(u, v)| map(rect, u, v))
         .collect();
-    painter.add(polyline(&check, stroke, false));
+    let mark = Stroke::new(3.0, Color32::from_rgb(245, 247, 250));
+    painter.add(Shape::line(check, path_stroke(mark)));
+}
+
+/// 大圆环内的"风险"状态图形，风格与 [`status_glyph_secure`] 对称。
+pub fn status_glyph_at_risk(painter: &Painter, rect: Rect, color: Color32) {
+    let body_fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 38);
+    let outline = Stroke::new(2.2, color);
+    warning_triangle(painter, rect, outline, Some(body_fill));
+    let mark = Stroke::new(2.8, Color32::from_rgb(245, 247, 250));
+    let top = map(rect, 0.50, 0.36);
+    let bottom = map(rect, 0.50, 0.60);
+    painter.line_segment([top, bottom], mark);
+    painter.circle_filled(map(rect, 0.50, 0.74), mark.width * 0.55, mark.color);
 }
 
 /// 警告三角形 + 感叹号，发现威胁状态用。
@@ -170,20 +192,22 @@ pub fn database(painter: &Painter, rect: Rect, stroke: Stroke) {
     );
 }
 
-/// 汉堡菜单（三条横线），对应"全盘扫描"侧边栏入口。
-pub fn hamburger(painter: &Painter, rect: Rect, stroke: Stroke) {
-    for v in [0.28, 0.5, 0.72] {
-        painter.line_segment([map(rect, 0.12, v), map(rect, 0.88, v)], stroke);
-    }
-}
+/// 电脑图标：显示器外框 + 内屏 + 支架，正方形画布内对称，表达"整机/全盘扫描"。
+pub fn computer(painter: &Painter, rect: Rect, stroke: Stroke) {
+    let bezel: Vec<Pos2> = [(0.18, 0.14), (0.82, 0.14), (0.82, 0.56), (0.18, 0.56)]
+        .iter()
+        .map(|&(u, v)| map(rect, u, v))
+        .collect();
+    painter.add(polyline(&bezel, stroke, true));
 
-/// "信息"图标：圆圈 + 一个 "i"（上面一个点，下面一条竖线）。病毒库路径那个
-/// "查看完整路径"按钮用，跟 warning_triangle 的感叹号是同一种画法（圆点+竖线）。
-pub fn info_circle(painter: &Painter, rect: Rect, stroke: Stroke) {
-    let radius = rect.width().min(rect.height()) / 2.0;
-    painter.circle_stroke(rect.center(), radius, stroke);
-    painter.circle_filled(map(rect, 0.5, 0.30), stroke.width * 1.1, stroke.color);
-    painter.line_segment([map(rect, 0.5, 0.46), map(rect, 0.5, 0.74)], stroke);
+    let screen: Vec<Pos2> = [(0.26, 0.22), (0.74, 0.22), (0.74, 0.48), (0.26, 0.48)]
+        .iter()
+        .map(|&(u, v)| map(rect, u, v))
+        .collect();
+    painter.add(polyline(&screen, stroke, true));
+
+    painter.line_segment([map(rect, 0.50, 0.56), map(rect, 0.50, 0.68)], stroke);
+    painter.line_segment([map(rect, 0.34, 0.74), map(rect, 0.66, 0.74)], stroke);
 }
 
 /// "文件夹"图标：线框风格，前片比后片矮一点，暗示"翻盖"的立体感。"打开所在

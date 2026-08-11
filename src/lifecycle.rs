@@ -6,16 +6,20 @@ pub enum RunMode {
     ShowWindow,
     /// 无窗口，仅托盘 + 后台扫描轮询。
     TrayOnly,
-    /// 显示独立「关于」小窗（结束后回到 `resume_after_about`）。
-    AboutOnly,
     /// 退出整个进程。
     Quit,
 }
 
 pub struct Lifecycle {
     pub mode: RunMode,
-    /// `AboutOnly` 关闭后恢复到的模式。
-    pub resume_after_about: Option<RunMode>,
+    /// 是否显示「关于」。它只是个覆盖标记，不单独改变窗口可见性——窗口是否可见
+    /// 由 `mode == ShowWindow || about_open` 决定。
+    pub about_open: bool,
+    /// 关于是否以「独占整个窗口」的形式呈现。
+    /// - `true`（来自托盘）：整个窗口只画关于页、不画主界面；关闭后由 reconcile 自动
+    ///   缩回托盘，不会残留主窗口。这正是用户要的"只显示关于页、不要主窗口"。
+    /// - `false`（来自主窗，当前没有入口，预留）：表现为叠在主界面之上的模态。
+    pub about_standalone: bool,
 }
 
 impl Lifecycle {
@@ -26,7 +30,8 @@ impl Lifecycle {
             } else {
                 RunMode::ShowWindow
             },
-            resume_after_about: None,
+            about_open: false,
+            about_standalone: false,
         }
     }
 }

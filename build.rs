@@ -36,12 +36,9 @@ fn main() {
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os != "windows" {
-        println!(
-            "cargo:warning=跳过 exe 图标嵌入：当前编译目标是 {target_os}，\
-             只有 Windows 目标会嵌图标。在 macOS/Linux 上请用 \
-             `cargo build --release --target x86_64-pc-windows-gnu`（或别名 \
-             `cargo build-win`）生成带图标的 clv3000.exe。"
-        );
+        // 非 Windows 目标不嵌图标（PE 图标资源只在 Windows 有意义），直接跳过。
+        // 交叉编译带图标的 exe 的方法见本文件顶部文档注释，这里不再每次 `cargo check`
+        // 都刷一条 warning 干扰输出。
         return;
     }
 

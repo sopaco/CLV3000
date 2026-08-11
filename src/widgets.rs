@@ -30,34 +30,6 @@ pub fn vertically_centered<R>(
     inner.inner
 }
 
-/// 一个只有图标、没有文字的小方按钮——比 `action_button` 那种"图标+文字"的
-/// 胶囊更紧凑，用在"查看完整路径"这类不需要文字说明、图标本身含义就够清楚
-/// （配合 `.on_hover_text` 兜底）的辅助操作上。尺寸固定（不用像 action_button
-/// 那样量文字宽度），调用点自己决定要不要再挂 `.on_hover_text(...)`。
-pub fn icon_only_button(
-    ui: &mut Ui,
-    size: f32,
-    draw: impl FnOnce(&egui::Painter, egui::Rect, Stroke),
-) -> Response {
-    let (response, painter) = ui.allocate_painter(Vec2::splat(size), Sense::click());
-    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let fill = if response.hovered() {
-        colors::ACCENT_BLUE_BG
-    } else {
-        colors::BG_CARD
-    };
-    painter.rect_filled(response.rect, 8.0, fill);
-    painter.rect_stroke(
-        response.rect,
-        8.0,
-        Stroke::new(1.0, colors::BORDER),
-        egui::epaint::StrokeKind::Inside,
-    );
-    let glyph_rect = response.rect.shrink(size * 0.26);
-    draw(&painter, glyph_rect, Stroke::new(1.6, colors::ACCENT_BLUE));
-    response
-}
-
 /// "伪粗体"文字：`.strong()` 在 egui 里其实只是换个颜色，并不会真的变粗（字体本身
 /// 只有一个字重，没有 bold 变体可选）。这里手动把同一段文字描两遍、横向错开不到
 /// 1px，模拟笔画加粗的效果——不依赖额外的粗体字体文件，跨 Windows/macOS 都一样。
@@ -120,20 +92,27 @@ pub fn progress_ring(
     center_title: &str,
     center_sub: &str,
 ) -> Response {
+    let ring_width = (diameter * 0.045).max(4.0);
+    // Middle 描边会向内外各扩 half width；allocate_painter 的 clip 正好卡在
+    // diameter 边界上，所以半径要按线宽留边，否则轨道左右会被裁掉。
+    let radius = diameter / 2.0 - ring_width / 2.0 - 1.0;
     let (response, painter) =
         ui.allocate_painter(Vec2::splat(diameter), Sense::hover());
     let rect = response.rect;
     let center = rect.center();
-    let radius = diameter / 2.0 - 6.0;
-    let ring_width = (diameter * 0.045).max(4.0);
 
-    // 同样是 premultiplied alpha 的坑：RGB 分量要按 alpha 比例先乘过，
-    // 不能直接写 (255,255,255,18)（那等于几乎不透明的白），用 unmultiplied
-    // 版本更不容易犯这个错——直接给"看起来的"颜色和透明度就行。
-    painter.circle_stroke(
+    // 背景轨道与前景弧必须用同一套 draw_arc 绘制：egui 的 circle_stroke 在
+    // 内部走 StrokeKind::Outside，而 PathStroke 默认是 Middle，两者半径语义
+    // 不同，会出现"灰圈和蓝圈对不上"以及灰圈外缘被 clip 的问题。
+    let track_color = Color32::from_rgba_unmultiplied(255, 255, 255, 18);
+    draw_arc(
+        &painter,
         center,
         radius,
-        Stroke::new(ring_width, Color32::from_rgba_unmultiplied(255, 255, 255, 18)),
+        ring_width,
+        -std::f32::consts::FRAC_PI_2,
+        std::f32::consts::TAU,
+        track_color,
     );
 
     let start_angle = -std::f32::consts::FRAC_PI_2;
@@ -154,7 +133,9 @@ pub fn progress_ring(
                 std::f32::consts::PI * 0.6,
                 ring_color,
             );
-            ui.ctx().request_repaint();
+            // 旋转动画需要持续重绘；限制在 ~30fps，兼顾流畅与老机器的 CPU 开销。
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(33));
         }
     }
 

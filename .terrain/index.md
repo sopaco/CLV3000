@@ -26,10 +26,13 @@ source: .
   - .claude/
     - skills/
   - Cargo.lock
+  - build.rs
   - README.md
   - .cargo/
     - config.toml
   - .gitignore
+  - scripts/
+    - bundle-macos.sh
   - AGENTS.md
   - assets/
     - backgrounds/
@@ -46,10 +49,14 @@ source: .
     - paths.rs
     - theme.rs
     - tray.rs
+    - clamav_info.rs
+    - wakeup.rs
+    - macos_reopen.rs
     - scan/
+    - about_dialog.rs
     - localtime.rs
-    - fonts.rs
     - main.rs
+    - lifecycle.rs
     - app.rs
     - widgets.rs
     - single_instance.rs

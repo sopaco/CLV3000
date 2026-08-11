@@ -1,5 +1,6 @@
 //! 主界面：仪表盘 / 闪电扫描 / 病毒库 / 全盘扫描 四个页面 + 自绘标题栏 + 全局底部资源条。
 
+use crate::clamav_info::ClamAvInfo;
 use crate::config::{AppConfig, ScanRecord};
 use crate::lifecycle::{Lifecycle, RunMode};
 use crate::localtime::Timestamp;
@@ -11,7 +12,6 @@ use crate::tray::Tray;
 use crate::widgets::{self, ThreatAction, Toast};
 use eframe::egui;
 use egui::{Color32, Stroke, Vec2, ViewportCommand};
-use muda::MenuEvent;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -19,6 +19,12 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 use tray_icon::TrayIconEvent;
+
+/// 主窗口默认尺寸（与 `main.rs` 里 `with_inner_size` 一致）。
+const MAIN_WINDOW_SIZE: [f32; 2] = [900.0, 600.0];
+/// 「关于」独占窗口尺寸：比主窗口小一圈，避免关于页背后留一大片黑底（见
+/// `about_dialog::paint_about_fullscreen`）。注意要 ≥ `main.rs` 里的 `min_inner_size`。
+const ABOUT_WINDOW_SIZE: [f32; 2] = [480.0, 460.0];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Page {
@@ -62,6 +68,14 @@ struct ScanPageState {
     /// 上一帧这个页面实际画出来的内容高度，给 `widgets::vertically_centered` 用来
     /// 算这一帧该留多少顶部空白。见该函数文档注释。
     content_height: f32,
+    /// clamscan 已 spawn、病毒库加载中（`EngineLoading` 置位，`ScanningFile` 清除）。
+    engine_loading: bool,
+    /// `EngineLoading` 携带的待引擎扫描文件数（仅用于状态行提示）。
+    engine_loading_remaining: usize,
+    /// 全盘扫描磁盘 walk 阶段已发现的可扫文件数。
+    walk_files_found: usize,
+    /// clamscan `-v` 的 `Scanning <path>` 行：当前正在引擎内检测的文件。
+    engine_scanning_path: Option<String>,
 }
 
 impl ScanPageState {
@@ -75,6 +89,10 @@ impl ScanPageState {
             last_error: None,
             started_at: None,
             content_height: 0.0,
+            engine_loading: false,
+            engine_loading_remaining: 0,
+            walk_files_found: 0,
+            engine_scanning_path: None,
         }
     }
 
@@ -92,6 +110,10 @@ impl ScanPageState {
         self.threats.clear();
         self.last_error = None;
         self.started_at = Some(Instant::now());
+        self.engine_loading = false;
+        self.engine_loading_remaining = 0;
+        self.walk_files_found = 0;
+        self.engine_scanning_path = None;
         let cancel = scan::new_cancel_flag();
         let (tx, rx) = std::sync::mpsc::channel();
         self.cancel = Some(cancel.clone());
@@ -126,20 +148,19 @@ impl ScanPageState {
 
     /// 返回 `Some((scanned, elapsed, cancelled))` 当这一批事件里出现了 `Finished`。
     ///
-    /// 每帧最多处理 `MAX_EVENTS_PER_FRAME` 个事件：clamscan 的 stdout 在管道上是块缓冲的，
-    /// 整个扫描过程的结果常常在进程退出时一次性 flush 进 channel。如果一帧全排空，
-    /// phase 会从 `Scanning(0)` 直接跳到 `Done`，UI 永远画不到中间的计数爬升过程。
-    /// 限流后突发的事件被分摊到连续几帧渲染，用户能肉眼看到 "1/109 → 2/109 → …"。
-    /// `Finished` 也会因此晚几帧到达（最多 `count / MAX_EVENTS_PER_FRAME` 帧），可忽略。
+    /// 每一帧把 channel 里**所有**事件都排空并处理：clamscan 的 stdout 在管道上是块
+    /// 缓冲的，整个扫描的结果常常在进程退出时一次性 flush 进 channel。早期版本用
+    /// `MAX_EVENTS_PER_FRAME` 把每帧处理的事件数限死（比如 4 个），上千个结果就被
+    /// 分摊到几百帧才排完，`Finished` 也跟着晚好几秒到达——进度环明明已扫完却还卡在
+    /// 很低的数、Done 页迟迟不出现，这就是"扫描页尾部滞后"。
+    ///
+    /// 现在每帧全排空：正常流式扫描时每帧本来只有 1~2 个事件，进度环照常逐帧爬升；
+    /// 只有进程退出那次突发 flush 会在一帧内把剩余结果全处理完，进度直接跳到 100%
+    /// 并立刻进入 Done——这正是我们想要的行为，滞后消失。
     fn poll(&mut self, config: &AppConfig) -> Option<(usize, Duration, bool)> {
-        const MAX_EVENTS_PER_FRAME: usize = 4;
         let mut finished = None;
-        let mut processed = 0usize;
         let Some(rx) = &self.rx else { return None };
-        while processed < MAX_EVENTS_PER_FRAME
-            && let Ok(event) = rx.try_recv()
-        {
-            processed += 1;
+        while let Ok(event) = rx.try_recv() {
             match event {
                 ScanEvent::Enumerating {
                     processes_done,
@@ -153,13 +174,34 @@ impl ScanPageState {
                     };
                 }
                 ScanEvent::ScanStarted { total } => {
+                    self.engine_loading = false;
+                    self.engine_loading_remaining = 0;
+                    self.engine_scanning_path = None;
+                    self.walk_files_found = 0;
                     self.phase = ScanPhase::Scanning {
                         total,
                         scanned: 0,
                         current_path: String::new(),
                     };
                 }
+                ScanEvent::WalkProgress { files_found } => {
+                    self.walk_files_found = files_found;
+                }
+                ScanEvent::EngineLoading { remaining } => {
+                    self.engine_loading = true;
+                    self.engine_loading_remaining = remaining;
+                    self.engine_scanning_path = None;
+                }
+                ScanEvent::ScanningFile { path } => {
+                    self.engine_loading = false;
+                    self.engine_scanning_path = Some(path.clone());
+                    if let ScanPhase::Scanning { current_path, .. } = &mut self.phase {
+                        *current_path = path;
+                    }
+                }
                 ScanEvent::FileScanned { path, infected } => {
+                    self.engine_loading = false;
+                    self.engine_scanning_path = None;
                     let total_hint = match &self.phase {
                         ScanPhase::Enumerating { files_found, .. } => Some(*files_found),
                         ScanPhase::Scanning { total, .. } => *total,
@@ -205,13 +247,29 @@ impl ScanPageState {
     }
 }
 
+/// 病毒库更新结果：区分"真的更新了"和"已经是最新、无需更新"。
+/// freshclam 在两者下都返回退出码 0，不能只靠退出码判断，否则会把
+/// "已是最新"也误报成"更新完成"，让用户以为版本涨了。
+/// 两个变体分别在 `run_freshclam`（Windows 真更新 / 未变）与开发 mock 中构造，
+/// 并由 `poll_background` 的 `match` 消费——无 dead_code 警告。
+#[derive(Debug, Clone, Copy)]
+enum UpdateOutcome {
+    Updated,
+    AlreadyUpToDate,
+}
+
 struct VirusDbState {
     updating: bool,
-    rx: Option<Receiver<Result<(), String>>>,
+    rx: Option<Receiver<Result<UpdateOutcome, String>>>,
+    /// 后台版本查询（`refresh_db_version`）的回传通道。`db_version` 在 `poll` 里
+    /// 从这条通道接收结果写回，保证版本刷新不阻塞 UI 线程。
+    version_rx: Option<Receiver<String>>,
     /// 左右两栏各自的上一帧内容高度，给 `widgets::vertically_centered` 用。两栏
     /// 内容不一样高，各自居中，不能共用一个高度。
     status_col_height: f32,
     about_col_height: f32,
+    /// 当前病毒库版本（来自 `clamscan -V`），更新完成后刷新，避免界面一直显示旧版本。
+    db_version: Option<String>,
 }
 
 impl VirusDbState {
@@ -219,12 +277,31 @@ impl VirusDbState {
         Self {
             updating: false,
             rx: None,
+            version_rx: None,
             status_col_height: 0.0,
             about_col_height: 0.0,
+            db_version: None,
         }
     }
 
-    fn start_update(&mut self) {
+    /// 异步重新查询病毒库版本：后台线程跑 `clamscan -V`，结果经 `version_rx` 回传，
+    /// 不在 UI 线程阻塞（之前是同步调 `database_version()`，会卡住一帧）。
+    /// 已有查询在飞（`version_rx` 挂着）就跳过，避免重复发起。
+    /// `ctx` 用于查询完成时唤醒 UI（闲置时 UI 没有定时心跳，不唤醒结果就一直没人收）。
+    fn refresh_db_version(&mut self, ctx: egui::Context) {
+        if self.version_rx.is_some() {
+            return; // 已有查询在飞，不重复发起
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.version_rx = Some(rx);
+        std::thread::spawn(move || {
+            let v = ClamAvInfo::database_version();
+            let _ = tx.send(v);
+            ctx.request_repaint();
+        });
+    }
+
+    fn start_update(&mut self, ctx: egui::Context) {
         if self.updating || !paths::freshclam_available() {
             return;
         }
@@ -232,50 +309,250 @@ impl VirusDbState {
         self.rx = Some(rx);
         self.updating = true;
         std::thread::spawn(move || {
-            let result = run_freshclam();
+            // 后台线程里跑 freshclam；万一它 panic，用 catch_unwind 兜住，
+            // 把 panic 信息作为错误带回主线程，而不是只报一个含糊的
+            // "Update thread stopped unexpectedly"（通道断开）。
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_freshclam))
+                .unwrap_or_else(|payload| {
+                    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic payload".to_string()
+                    };
+                    Err(format!("Update thread panicked: {msg}"))
+                });
             let _ = tx.send(result);
+            // 唤醒 UI 立刻消费更新结果（弹 Toast / 刷新版本号），不等任何心跳。
+            ctx.request_repaint();
         });
     }
 
-    /// 返回本次轮询里出现的结果（如果有）。
-    fn poll(&mut self) -> Option<Result<(), String>> {
-        let mut result = None;
-        if let Some(rx) = &self.rx
-            && let Ok(r) = rx.try_recv()
-        {
-            self.updating = false;
-            result = Some(r);
+    /// 返回本次轮询里出现的更新结果（如果有）；同时把后台版本查询结果写回
+    /// `db_version`（不弹 toast）。两条通道都在主线程这里排空，UI 线程读取的
+    /// `db_version` 永远由主线程写入，无数据竞争。
+    fn poll(&mut self) -> Option<Result<UpdateOutcome, String>> {
+        // 先处理更新结果（来自 start_update 的后台线程）。
+        let update_result = match self.rx.as_ref().map(|rx| rx.try_recv()) {
+            Some(Ok(r)) => {
+                self.updating = false;
+                // 必须同时清掉已完成的 Receiver：发送端（后台线程）已销毁，
+                // 若留着它，下一帧 try_recv 会得到 Disconnected，把一次成功的
+                // 更新误报成 "Update thread stopped unexpectedly"。
+                self.rx = None;
+                Some(r)
+            }
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                // 后台线程异常退出（panic / 被强杀）会触发通道断开，
+                // 否则 `updating` 永远为 true，按钮永久卡在 "Updating…"。
+                self.updating = false;
+                self.rx = None;
+                Some(Err("Update thread stopped unexpectedly".to_string()))
+            }
+            _ => None,
+        };
+
+        // 再处理版本查询结果（来自 refresh_db_version 的后台线程）。
+        match self.version_rx.as_ref().map(|rx| rx.try_recv()) {
+            Some(Ok(v)) => {
+                self.db_version = Some(v);
+                self.version_rx = None;
+            }
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                // 版本查询线程异常退出：清掉孤儿 Receiver，下次需要时会重新发起。
+                self.version_rx = None;
+            }
+            _ => {}
         }
-        result
+
+        update_result
     }
 }
 
 #[cfg(windows)]
-fn run_freshclam() -> Result<(), String> {
+fn run_freshclam() -> Result<UpdateOutcome, String> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    let mut cmd = Command::new(paths::freshclam_path());
-    cmd.arg(format!(
-        "--datadir={}",
-        paths::clamav_database_dir().display()
-    ))
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .creation_flags(0x0800_0000);
+    let db_dir =
+        paths::resolved_clamav_database_dir().unwrap_or_else(|| paths::clamav_database_dir());
+    // 跑之前先记一份数据库目录签名，跑完再比对——freshclam 在"已是最新"时
+    // 也返回退出码 0，光看退出码会把"没变化"误判成"更新成功"。
+    let before = database_signature(&db_dir);
 
-    match cmd.status() {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(format!("Database update failed with exit code {status}")),
+    let mut cmd = Command::new(paths::freshclam_path());
+    cmd.arg(format!("--datadir={}", db_dir.display()))
+        .stdout(Stdio::null())
+        // 保留 stderr 管道：freshclam 的报错（配置文件缺失、连不上镜像源等）都走
+        // stderr，失败时把它塞进错误提示，比只报退出码有用得多。
+        .stderr(Stdio::piped())
+        .creation_flags(0x0800_0000);
+
+    match cmd.output() {
+        Ok(out) if out.status.success() => {
+            let after = database_signature(&db_dir);
+            if after != before {
+                Ok(UpdateOutcome::Updated)
+            } else {
+                Ok(UpdateOutcome::AlreadyUpToDate)
+            }
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            if stderr.is_empty() {
+                Err(format!(
+                    "Database update failed with exit code {}",
+                    out.status
+                ))
+            } else {
+                Err(format!(
+                    "Database update failed (exit {}): {}",
+                    out.status, stderr
+                ))
+            }
+        }
         Err(e) => Err(format!("Failed to start freshclam: {e}")),
     }
 }
 
+/// 数据库目录签名：把所有签名文件（.cvd/.cld/.cud）的「文件名:大小:修改时间」
+/// 拼成一段稳定字符串，用来判断 freshclam 跑完之后文件到底有没有变。
+#[cfg(any(windows, target_os = "macos"))]
+fn database_signature(dir: &std::path::Path) -> String {
+    use std::collections::BTreeMap;
+    let mut map: BTreeMap<String, (u64, std::time::SystemTime)> = BTreeMap::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if matches!(ext, "cvd" | "cld" | "cud") {
+                if let Ok(meta) = std::fs::metadata(&p) {
+                    let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                        map.insert(name.to_string(), (meta.len(), mtime));
+                    }
+                }
+            }
+        }
+    }
+    let mut sig = String::new();
+    for (name, (len, mtime)) in map {
+        sig.push_str(&format!("{name}:{len}:{mtime:?}|"));
+    }
+    sig
+}
+
 /// 开发预览用：不真的联网更新，睡一下模拟"正在更新"的等待感，然后报成功。
-#[cfg(not(windows))]
-fn run_freshclam() -> Result<(), String> {
+/// 用原子计数器在 `Updated` / `AlreadyUpToDate` 之间来回切，方便开发时预览两种
+/// 提示文案；同时保证 `AlreadyUpToDate` 变体在非 Windows 构建里也被构造
+/// （否则会触发 dead_code 警告——Windows 真路径会构造它，但 dev 桩原本只造 Updated）。
+/// macOS：真实调用 `freshclam` 更新病毒库，逻辑与 Windows 版一致（跑前/跑后比对
+/// 数据库目录签名，区分"已更新"与"已是最新"），只是不需要 `creation_flags`。
+#[cfg(target_os = "macos")]
+fn run_freshclam() -> Result<UpdateOutcome, String> {
+    use std::process::{Command, Stdio};
+
+    let db_dir =
+        paths::resolved_clamav_database_dir().unwrap_or_else(|| paths::clamav_database_dir());
+    // 跑之前先记一份数据库目录签名，跑完再比对——freshclam 在"已是最新"时
+    // 也返回退出码 0，光看退出码会把"没变化"误判成"更新成功"。
+    let before = database_signature(&db_dir);
+
+    let mut cmd = Command::new(paths::freshclam_path());
+    // macOS 上没有系统默认 freshclam.conf，必须显式指定，否则 freshclam 直接报
+    // "Can't open/parse the config file" 退出。config 里已含 DatabaseDirectory，
+    // 这里再补一个 --datadir（与 config 一致）兜底，确保写到 resolved 目录。
+    if let Some(cfg) = paths::freshclam_config_path() {
+        cmd.arg("--config-file").arg(cfg);
+    }
+    cmd.arg(format!("--datadir={}", db_dir.display()))
+        // 保留 stdout / stderr 管道：freshclam 的更新进度走 stdout，报错（配置文件缺失、
+        // 连不上镜像源等）走 stderr。失败时把它们写进调试日志，比只报退出码有用得多。
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut spawned_args: Vec<String> = vec![paths::freshclam_path().display().to_string()];
+    if let Some(cfg) = paths::freshclam_config_path() {
+        spawned_args.push("--config-file".to_string());
+        spawned_args.push(cfg.display().to_string());
+    }
+    spawned_args.push(format!("--datadir={}", db_dir.display()));
+
+    // 先算出结果，再统一写调试日志（含 stdout/stderr/退出码），最后返回。
+    // stderr_log 在 match 的两个分支里都会被赋值，故用延迟初始化声明。
+    let mut stdout_log = String::new();
+    let stderr_log: String;
+    let result = match cmd.output() {
+        Ok(out) => {
+            stdout_log = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            stderr_log = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            if out.status.success() {
+                let after = database_signature(&db_dir);
+                if after != before {
+                    Ok(UpdateOutcome::Updated)
+                } else {
+                    Ok(UpdateOutcome::AlreadyUpToDate)
+                }
+            } else if stderr_log.is_empty() {
+                Err(format!(
+                    "Database update failed with exit code {}",
+                    out.status
+                ))
+            } else {
+                Err(format!(
+                    "Database update failed (exit {}): {}",
+                    out.status, stderr_log
+                ))
+            }
+        }
+        Err(e) => {
+            let msg = format!("Failed to start freshclam: {e}");
+            stderr_log = msg.clone();
+            Err(msg)
+        }
+    };
+    debug_log_freshclam(&spawned_args, &result, &stdout_log, &stderr_log);
+    result
+}
+
+/// 开发预览用（Linux 等）：不真的联网更新，睡一下模拟"正在更新"的等待感，然后报成功。
+/// 用原子计数器在 `Updated` / `AlreadyUpToDate` 之间来回切，方便开发时预览两种
+/// 提示文案。
+#[cfg(not(any(windows, target_os = "macos")))]
+fn run_freshclam() -> Result<UpdateOutcome, String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static TOGGLE: AtomicUsize = AtomicUsize::new(0);
     std::thread::sleep(Duration::from_millis(1200));
-    Ok(())
+    if TOGGLE.fetch_add(1, Ordering::Relaxed) % 2 == 0 {
+        Ok(UpdateOutcome::Updated)
+    } else {
+        Ok(UpdateOutcome::AlreadyUpToDate)
+    }
+}
+
+/// macOS 调试用：把 freshclam 的命令行、退出码、stdout、stderr 追加写到
+/// `/tmp/clv3000_freshclam.log`，方便在 GUI 子进程里复现失败时拿到完整现场
+/// （GUI 跑的命令和终端里手敲的偶尔会因环境不同而出错，光看弹窗里的简短报错不够）。
+#[cfg(target_os = "macos")]
+fn debug_log_freshclam(
+    args: &[String],
+    result: &Result<UpdateOutcome, String>,
+    stdout: &str,
+    stderr: &str,
+) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!(
+        "[{stamp}] args={args:?}\n  result={result:?}\n  stdout={stdout}\n  stderr={stderr}\n"
+    );
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/clv3000_freshclam.log")
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
 }
 
 /// 跨「窗口会话」保留的业务状态（配置、扫描、页面路由）。纯托盘模式下也存在。
@@ -301,7 +578,8 @@ impl AppCore {
     }
 
     /// 轮询扫描/病毒库后台线程；返回需要弹 Toast 的消息（仅窗口会话消费）。
-    pub fn poll_background(&mut self) -> Vec<String> {
+    /// `ctx` 透传给更新完成后的版本号刷新（后台线程完成时要能唤醒 UI）。
+    pub fn poll_background(&mut self, ctx: &egui::Context) -> Vec<String> {
         let mut toasts = Vec::new();
         if let Some((scanned, elapsed, cancelled)) = self.quick.poll(&self.config) {
             if !cancelled {
@@ -327,7 +605,14 @@ impl AppCore {
         }
         if let Some(result) = self.virus_db.poll() {
             match result {
-                Ok(()) => toasts.push("Database update complete".to_string()),
+                Ok(UpdateOutcome::Updated) => {
+                    self.virus_db.refresh_db_version(ctx.clone());
+                    toasts.push("Virus database updated".to_string());
+                }
+                Ok(UpdateOutcome::AlreadyUpToDate) => {
+                    self.virus_db.refresh_db_version(ctx.clone());
+                    toasts.push("Virus database already up to date".to_string());
+                }
                 Err(e) => toasts.push(format!("Database update failed: {e}")),
             }
         }
@@ -336,28 +621,48 @@ impl AppCore {
 }
 
 /// 托盘/菜单事件：窗口与纯托盘循环共用。
-pub fn poll_tray_events(tray: &Tray, core: &mut AppCore, lifecycle: &mut Lifecycle) {
-    while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+/// 事件来自 `wakeup` 模块的转发队列——转发线程阻塞在 tray-icon/muda 的全局
+/// channel 上，事件到达时已经替我们 `request_repaint` 唤醒了 UI，这里只管排空。
+/// 排空托盘事件队列。返回 `true` 表示用户通过托盘请求把窗口带到前台（含窗口已可见但被
+/// 其它 App 遮挡、仅需置顶的情况）。
+pub fn poll_tray_events(tray: &Tray, core: &mut AppCore, lifecycle: &mut Lifecycle) -> bool {
+    let mut focus_requested = false;
+    // 锁只在这一小段排空循环里持有，发送端（wakeup 转发线程）基本碰不到竞争。
+    while let Ok(event) = crate::wakeup::tray_events().lock().unwrap().try_recv() {
         if let TrayIconEvent::DoubleClick { .. } = event {
+            // 双击托盘：显示主窗口（同时清掉可能打开的关于层）。
             lifecycle.mode = RunMode::ShowWindow;
+            lifecycle.about_open = false;
+            lifecycle.about_standalone = false;
+            focus_requested = true;
         }
     }
 
-    while let Ok(event) = MenuEvent::receiver().try_recv() {
+    while let Ok(event) = crate::wakeup::menu_events().lock().unwrap().try_recv() {
         let id = event.id();
         if id == &tray.ids.show {
+            // 显示主窗口：清掉关于层，否则关于独占窗口会挡住主界面。
             lifecycle.mode = RunMode::ShowWindow;
+            lifecycle.about_open = false;
+            lifecycle.about_standalone = false;
+            focus_requested = true;
         } else if id == &tray.ids.quick_scan {
             lifecycle.mode = RunMode::ShowWindow;
+            lifecycle.about_open = false;
+            lifecycle.about_standalone = false;
             core.page = Page::QuickScan;
             core.quick.start(core.config.scan_removable_drives);
+            focus_requested = true;
         } else if id == &tray.ids.about {
-            lifecycle.resume_after_about = Some(lifecycle.mode);
-            lifecycle.mode = RunMode::AboutOnly;
+            // 来自托盘的关于：只占整个窗口画关于页，不画主界面（about_standalone）。
+            lifecycle.about_open = true;
+            lifecycle.about_standalone = true;
+            focus_requested = true;
         } else if id == &tray.ids.quit {
             lifecycle.mode = RunMode::Quit;
         }
     }
+    focus_requested
 }
 
 pub struct App {
@@ -376,6 +681,26 @@ pub struct App {
     /// （Windows 用系统标题栏，不加载）。
     #[cfg(not(windows))]
     titlebar_icon_texture: Option<egui::TextureHandle>,
+    /// 主视口当前是否处于「隐藏到托盘」状态。eframe 会话全程存活（不再关闭重建），
+    /// 关闭窗口改成 `Visible(false)` 隐藏视口，靠这个标志位在 `logic` 里把生命周期
+    /// 模式（ShowWindow / TrayOnly）对齐到真实的视口可见性。
+    window_hidden: bool,
+    /// 从托盘唤回窗口后的「置顶倒计时」：macOS 14+ 下单次 `activate()` 抢不到焦点、
+    /// 窗口不会自动浮到最前，需要在接下来若干帧里反复 `orderFrontRegardless()` 才能稳
+    /// 定把窗口提到最前（见 `macos_reopen::bring_to_front`）。每帧递减，归零后停止。
+    activate_countdown: u8,
+    /// 当前窗口尺寸的「意图」：0 = 主窗口尺寸，1 = 关于独占窗口尺寸。只在意图变化
+    /// 时才发 `InnerSize` 指令，避免每帧重置、干扰用户对主窗口的手动缩放。
+    size_intent: u8,
+    /// macOS：上一帧 `NSWindow::isMiniaturized` 是否为 true。用于区分「正在最小化」
+    /// （egui 已标记 minimized 但原生窗口尚未 miniaturize）与「从 Dock 恢复」
+    /// （原生已 deminiaturize 但 egui 仍标记 minimized）。
+    #[cfg(target_os = "macos")]
+    macos_was_miniaturized: bool,
+    /// macOS：上一帧 `NSApplication::isActive` 是否为 true。用于检测 Dock 点击 /
+    /// Cmd+Tab 切回本 App 时把已可见但被其它窗口遮挡的窗口提到最前。
+    #[cfg(target_os = "macos")]
+    macos_was_active: bool,
 }
 
 /// 把 `icon_data::load_*_icon` 解出来的 `(rgba, w, h)` 传进 egui 的纹理系统，
@@ -397,8 +722,12 @@ impl App {
         tray_slot: Rc<RefCell<Option<Tray>>>,
     ) -> Self {
         theme::apply(&cc.egui_ctx);
+        // 注册当前会话的 egui Context，让 wakeup 转发线程 / sysmon 采样线程能在
+        // 有事件（托盘点击、菜单、资源采样）时主动唤醒 UI——替代旧的定时心跳。
+        crate::wakeup::register_ctx(&cc.egui_ctx);
 
         let tray = tray_slot.borrow_mut().take();
+        let window_hidden = lifecycle.borrow().mode == RunMode::TrayOnly;
 
         Self {
             core,
@@ -412,6 +741,13 @@ impl App {
             app_icon_texture: None,
             #[cfg(not(windows))]
             titlebar_icon_texture: None,
+            window_hidden,
+            activate_countdown: 0,
+            size_intent: 0,
+            #[cfg(target_os = "macos")]
+            macos_was_miniaturized: false,
+            #[cfg(target_os = "macos")]
+            macos_was_active: crate::macos_reopen::is_app_active(),
         }
     }
 
@@ -429,14 +765,17 @@ impl App {
 
     fn ensure_ui_resources(&mut self, ctx: &egui::Context) {
         if self.sysmon.is_none() {
-            self.sysmon = Some(sysmon::spawn());
+            self.sysmon = Some(sysmon::spawn(ctx.clone()));
         }
         if self.app_icon_texture.is_none() {
             const LOGO_DISPLAY_PT: f32 = 90.0;
             self.app_icon_texture = Some(load_texture(
                 ctx,
                 "app_icon",
-                crate::icon_data::load_app_icon_for_display(LOGO_DISPLAY_PT, ctx.pixels_per_point()),
+                crate::icon_data::load_app_icon_for_display(
+                    LOGO_DISPLAY_PT,
+                    ctx.pixels_per_point(),
+                ),
             ));
         }
         #[cfg(not(windows))]
@@ -462,48 +801,180 @@ impl App {
     }
 
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
+        // 释放 GPU 纹理与资源监控，但**不关闭** eframe 会话——eframe 事件循环（以及
+        // 其背后的 AppKit / winit 消息泵）必须一直存活，托盘图标的菜单点击才能被
+        // 系统正常投递。真正"关闭窗口"改成把视口藏起来（`Visible(false)`）。
         self.release_ui_resources(ctx);
         self.lifecycle.borrow_mut().mode = RunMode::TrayOnly;
-        self.allow_exit = true;
-        ctx.send_viewport_cmd(ViewportCommand::Close);
+        // 立即发 `Visible(false)` 并置 `window_hidden`，而不是等下一帧 reconcile——
+        // `Visible` 是异步指令（winit 在本帧结束才真正 `orderOut`），越早发越早生效。
+        // 若拖到下一帧 reconcile 发，则下一帧 `ui()` 会在仍可见的窗口上因 `window_hidden`
+        // 早退、画一帧纯背景色，用户就看到"关闭时闪一下"。立即发则 winit 在本帧结束就
+        // 藏窗口，下一帧 `ui()` 跑在已隐藏窗口上，无可见闪烁。同时清零 `activate_countdown`，
+        // 避免隐藏后倒计数继续 `orderFrontRegardless` 把窗口又拉可见（见 skill 第 7 节）。
+        // Accessory 策略由 reconcile 的"已隐藏"分支下一帧补上（窗口已藏，1 帧延迟无碍）。
+        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        self.window_hidden = true;
+        self.activate_countdown = 0;
     }
 
     fn poll_tray(&mut self, ctx: &egui::Context) {
         let Some(tray) = self.tray() else { return };
 
-        // 先在局部作用域里轮询托盘事件并取出下一模式，再 drop 所有 RefCell 借用。
-        // `send_viewport_cmd(Close)` 可能同步重入 `logic()`，若仍持有 `borrow_mut` 会 panic。
-        let next_mode = {
+        // 只在局部作用域里轮询托盘事件并取出下一模式，再 drop 所有 RefCell 借用——
+        // 真正的视口指令（显示/隐藏/退出）统一交给 `reconcile_lifecycle`，避免在此处
+        // 同步重入 `logic()` 导致仍持有 `borrow_mut` 时 panic。
+        let (next_mode, tray_focus) = {
             let mut core = self.core.borrow_mut();
             let mut lifecycle = self.lifecycle.borrow_mut();
-            poll_tray_events(tray, &mut core, &mut lifecycle);
-            lifecycle.mode
+            let tray_focus = poll_tray_events(tray, &mut core, &mut lifecycle);
+            (lifecycle.mode, tray_focus)
         };
+
+        if tray_focus {
+            self.activate_countdown = self.activate_countdown.max(12);
+        }
 
         match next_mode {
             RunMode::Quit => {
                 self.allow_exit = true;
-                ctx.send_viewport_cmd(ViewportCommand::Close);
             }
-            RunMode::AboutOnly => {
-                self.release_ui_resources(ctx);
-                self.allow_exit = true;
-                ctx.send_viewport_cmd(ViewportCommand::Close);
+            _ => {
+                let _ = ctx;
             }
-            _ => {}
         }
     }
 
-    fn poll_background(&mut self) {
-        let toasts = self.core.borrow_mut().poll_background();
+    /// 把生命周期模式对齐到真实的视口可见性 + macOS 激活策略。eframe 会话全程存活，
+    /// 所以这里只发 `Visible` / 激活策略指令，绝不 `Close`（除非用户真的点了退出）。
+    ///
+    /// 可见条件：`ShowWindow` 模式，或「关于」打开（无论是覆盖在主窗上、还是独占窗口）。
+    /// 「关于」独占窗口时主视口必须可见——这正是来自托盘的关于会把窗口带出来的原因；
+    /// 关闭关于后若来源是托盘、`mode` 仍是 `TrayOnly`，下一帧这里就会把视口重新藏起来，
+    /// 不会残留主窗口。
+    ///
+    /// macOS 激活策略（见 src/macos_reopen.rs）：
+    /// - 有窗口时 → `Regular`：正常 App，带 Dock 图标与前台菜单；
+    /// - 隐藏到托盘时 → `Accessory`：菜单栏小工具模式，无 Dock 图标。这样托盘态下 App
+    ///   根本不在 Dock 上，用户想要"关闭窗口后只留托盘、不必再占 Dock"的需求直接满足，
+    ///   也彻底绕开了"winit 不处理 Dock 重新打开事件 → 点 Dock 唤不回窗口"的坑。
+    fn reconcile_lifecycle(&mut self, ctx: &egui::Context) {
+        let (mode, about_open, about_standalone) = {
+            let lc = self.lifecycle.borrow();
+            (lc.mode, lc.about_open, lc.about_standalone)
+        };
+        if mode == RunMode::Quit {
+            self.allow_exit = true;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+            return;
+        }
+        let desired_visible = mode == RunMode::ShowWindow || about_open;
+        if desired_visible {
+            // 有窗口：必须是 Regular（Dock 图标 + 前台菜单），并确保窗口可见。
+            #[cfg(target_os = "macos")]
+            crate::macos_reopen::set_accessory(false);
+            // 记下"本帧是否刚从隐藏变为可见"——这是"窗口被打开"的判定，用于统一居中。
+            let just_shown = self.window_hidden;
+            if just_shown {
+                ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+                self.window_hidden = false;
+                // 从托盘（隐藏）唤回：接下来若干帧反复把窗口提到最前
+                // （Accessory→Regular 切换 + macOS 14 激活策略变化，单次 activate 不够）。
+                self.activate_countdown = 12;
+            }
+            // 关于独占窗口用较小的尺寸，主窗口用默认尺寸；只在「尺寸意图」变化时发
+            // 指令，避免每帧都重置、干扰用户对主窗口的手动缩放。
+            let intent = if about_open && about_standalone { 1 } else { 0 };
+            let intent_changed = intent != self.size_intent;
+            if intent_changed {
+                let size = if intent == 1 {
+                    ABOUT_WINDOW_SIZE
+                } else {
+                    MAIN_WINDOW_SIZE
+                };
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(size.into()));
+                self.size_intent = intent;
+            }
+            // 统一居中：窗口刚从隐藏显示（"打开"），或尺寸意图变化（主窗↔关于窗切换）
+            // 时，都把窗口挪到所在显示器正中央。两类触发都是边沿条件，用户拖动后停留
+            // 在同尺寸窗口/同一可见周期内不会被反复拽回中心。
+            //
+            // 之前只在「关于打开」(intent==1) 时居中，导致"从托盘开关于→关关于→再开
+            // 主窗"时主窗只收到 `InnerSize` 不收 `OuterPosition`，于是继承了关于窗
+            // （更小、已居中）的左上角，更大的主窗看上去就偏到屏幕右下角——即用户
+            // 报告的"主窗口位置偏了、对齐了前一个关于窗口的左上角"现象。
+            if just_shown || intent_changed {
+                let size = if intent == 1 {
+                    ABOUT_WINDOW_SIZE
+                } else {
+                    MAIN_WINDOW_SIZE
+                };
+                // 无边框窗口 OuterPosition 即内容区左上角；取所在显示器的尺寸算居中。
+                // 首次显示时若 winit 还没给出 monitor（--tray-only 启动后第一次唤回），
+                // 这里 `None` 跳过，由 `NativeOptions::centered` 兜底。
+                if let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) {
+                    let origin = ((monitor - Vec2::from(size)) / 2.0).max(Vec2::ZERO);
+                    ctx.send_viewport_cmd(ViewportCommand::OuterPosition(origin.to_pos2()));
+                }
+            }
+        } else if !self.window_hidden {
+            // 进托盘态：先把视口藏起来，再切到 Accessory（离开 Dock）。
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+            self.window_hidden = true;
+            // 必须同步清零「置顶唤回」倒计数——否则接下来若干帧 `bring_to_front()`
+            // 会调 `NSWindow::orderFrontRegardless()`，该方法无视 winit 刚发出的
+            // `Visible(false)`（即 `orderOut:`），把已隐藏的窗口再次强制可见并置顶；
+            // 而 `ui()` 又因 `window_hidden && !about_open` 整帧跳过不画内容，
+            // 用户就会在关闭窗口后看到一张与窗口同尺寸的纯黑空背景短暂闪现
+            // （"关掉又冒出黑底"现象的根因）。
+            self.activate_countdown = 0;
+            #[cfg(target_os = "macos")]
+            crate::macos_reopen::set_accessory(true);
+        } else {
+            // 已隐藏：确保每个隐藏周期都落到 Accessory（例如 `--tray-only` 启动即隐藏）。
+            #[cfg(target_os = "macos")]
+            crate::macos_reopen::set_accessory(true);
+        }
+    }
+
+    fn poll_background(&mut self, ctx: &egui::Context) {
+        let toasts = self.core.borrow_mut().poll_background(ctx);
         for msg in toasts {
             self.toast(msg);
         }
+    }
+
+    /// macOS：把 egui 里陈旧的 `minimized` 标记与 `NSWindow` 真实状态对齐。
+    ///
+    /// 用户点标题栏最小化后从 Dock 恢复时，原生窗口已 deminiaturize，但 egui-winit
+    /// 不会在运行时刷新 minimized（防死锁），`ui()` 会被跳过。仅在检测到「上一帧已
+    /// miniaturize、本帧已 deminiaturize、但 egui 仍标记 minimized」时补发
+    /// `Minimized(false)`——避免在最小化动画尚未完成时误把最小化指令抵消。
+    ///
+    /// 返回 `true` 表示刚完成「从最小化恢复」的对齐（可顺带触发置顶唤回）。
+    #[cfg(target_os = "macos")]
+    fn sync_macos_minimized_viewport(&mut self, ctx: &egui::Context) -> bool {
+        if self.window_hidden {
+            self.macos_was_miniaturized = false;
+            return false;
+        }
+        let now_miniaturized = crate::macos_reopen::is_miniaturized();
+        let stale_minimized = ctx.input(|i| i.viewport().minimized == Some(true));
+        let restored_from_dock =
+            stale_minimized && !now_miniaturized && self.macos_was_miniaturized;
+        self.macos_was_miniaturized = now_miniaturized;
+        if restored_from_dock {
+            ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+            ctx.request_repaint();
+            return true;
+        }
+        false
     }
 }
 
 impl Drop for App {
     fn drop(&mut self) {
+        crate::wakeup::unregister_ctx();
         if let Some(tray) = self.tray.take() {
             *self.tray_slot.borrow_mut() = Some(tray);
         }
@@ -513,7 +984,48 @@ impl Drop for App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_tray(ctx);
-        self.poll_background();
+
+        // 「关于」关闭信号 ABOUT_CLOSED 改在 ui() 阶段消费（paint_about_fullscreen 之后
+        // 当场调 hide_to_tray 藏窗口），不在 logic 里消费。logic 在 ui 之前跑，若在这里
+        // 消费会让 reconcile 当帧发 Visible(false)，紧接着 ui() 在仍可见窗口上早退画一帧
+        // 纯背景色 → "关闭时闪一下"。ui 阶段消费则 winit 在该帧结束就藏窗口，下一帧
+        // ui() 跑在已隐藏窗口上，无可见闪烁。详见 ui() 里 paint_about_fullscreen 之后。
+        self.reconcile_lifecycle(ctx);
+
+        #[cfg(target_os = "macos")]
+        if self.sync_macos_minimized_viewport(ctx) {
+            // Dock 点回最小化窗口：与托盘唤回类似，连续几帧置顶更稳。
+            self.activate_countdown = self.activate_countdown.max(12);
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let active = crate::macos_reopen::is_app_active();
+            // 窗口已可见但被其它 App 盖住时，点 Dock / Cmd+Tab 只会激活 App、不会自动
+            // 把 winit 窗口浮到最前；检测到 inactive→active 且非托盘隐藏态时主动置顶。
+            if active && !self.macos_was_active && !self.window_hidden {
+                self.activate_countdown = self.activate_countdown.max(12);
+            }
+            self.macos_was_active = active;
+        }
+
+        // 从托盘唤回后的几帧内，反复把窗口提到最前（见 macos_reopen::bring_to_front）。
+        // macOS 14+ 下单次 activate 抢不到焦点，必须连续几帧 orderFrontRegardless 才稳。
+        // 防御：若窗口已被隐藏（任何路径把 `window_hidden` 置 true 都应同时清零倒计数，
+        // 这里再做一次兜底），绝不能继续 `bring_to_front()`——`orderFrontRegardless()`
+        // 会强制把已 orderOut 的 NSWindow 重新可见，覆盖刚发出的 `Visible(false)`，
+        // 同时 `request_repaint_after(30ms)` 会因倒计数不清零而持续触发，造成闲置 CPU。
+        if self.activate_countdown > 0 {
+            if !self.window_hidden {
+                #[cfg(target_os = "macos")]
+                crate::macos_reopen::bring_to_front();
+                self.activate_countdown -= 1;
+            } else {
+                self.activate_countdown = 0;
+            }
+        }
+
+        self.poll_background(ctx);
 
         if let Some(sysmon) = &self.sysmon
             && let Ok(sample) = sysmon.rx.try_recv()
@@ -521,22 +1033,95 @@ impl eframe::App for App {
             self.last_sample = sample;
         }
 
+        // 重绘策略：尽量事件驱动，绝不让事件循环空转——这是老机器上常驻 CPU 的关键。
+        // - 正在「置顶唤回」：30ms 短间隔快速收敛（原有行为，仅十几帧）。
+        // - 有扫描在跑：扫描页自己按 ~30fps 刷新（见 scan_page / progress_ring）；
+        //   这里只留一个低频兜底（可见 250ms / 托盘 500ms），保证用户停在其它页面、
+        //   或窗口隐藏时，扫描事件仍能被排空、结果被记录。
+        // - 其余（闲置，无论窗口可见还是纯托盘）：**不安排任何定时重绘**。托盘/菜单
+        //   点击由 wakeup 转发线程唤醒，底部资源条由 sysmon 采样线程按 1Hz 唤醒，
+        //   Toast 有自己的短时定时器，键盘/鼠标输入本身就会触发重绘。
         let visible = ctx.input(|i| i.viewport().visible().unwrap_or(true));
-        let interval = if visible { 250 } else { 1000 };
-        ctx.request_repaint_after(Duration::from_millis(interval));
+        if self.activate_countdown > 0 {
+            ctx.request_repaint_after(Duration::from_millis(30));
+        } else {
+            let scan_running = {
+                let core = self.core.borrow();
+                core.quick.is_running() || core.full.is_running()
+            };
+            if scan_running {
+                ctx.request_repaint_after(Duration::from_millis(if visible { 250 } else { 500 }));
+            }
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.ensure_ui_resources(&ctx);
 
-        // 关闭按钮默认改成"最小化到托盘"，只有托盘菜单里的"退出"才真正关程序。
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_exit {
+        // 关闭按钮：关于打开时只关关于层（绝不连带关主窗口）；否则（且非真正退出）
+        // 最小化到托盘。
+        if ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            self.hide_to_tray(&ctx);
+            if self.lifecycle.borrow().about_open {
+                let mode = self.lifecycle.borrow().mode;
+                {
+                    let mut lc = self.lifecycle.borrow_mut();
+                    lc.about_open = false;
+                    lc.about_standalone = false;
+                }
+                // 来自托盘的关于（TrayOnly）连窗口一起藏（hide_to_tray 立即发 Visible(false)），
+                // 否则要等下一帧 reconcile 才藏，中间一帧 ui() 会画纯背景色 → 闪一下。
+                if mode == RunMode::TrayOnly {
+                    self.hide_to_tray(&ctx);
+                }
+                return;
+            } else if self.lifecycle.borrow().mode != RunMode::Quit && !self.allow_exit {
+                self.hide_to_tray(&ctx);
+                return;
+            }
+        }
+
+        let (about_open, about_standalone) = {
+            let lc = self.lifecycle.borrow();
+            (lc.about_open, lc.about_standalone)
+        };
+
+        // 隐藏到托盘（且没开关于）时整窗不绘制——既无可见内容，也避免出现"关掉关于
+        // 窗却留下主窗口"的错觉。
+        if self.window_hidden && !about_open {
             return;
         }
 
+        // 来自托盘的关于：独占整个窗口画关于页，不画主界面——背后是深色主题底，
+        // 看起来就是一张独立的关于窗口。关闭后由 reconcile 自动缩回托盘，不会残留主窗口。
+        if about_open && about_standalone {
+            crate::about_dialog::paint_about_fullscreen(ui);
+            // 在 ui 阶段消费关闭信号（OK / Esc / 标题关闭按钮都在 paint_about_fullscreen
+            // 内置位 ABOUT_CLOSED），并当场藏窗口。关于关闭的两类问题都靠这一处：
+            // - 之前若在 logic 消费（take_closed 在 reconcile 前）→ reconcile 当帧发
+            //   Visible(false)，但 ui() 紧跟其后在仍可见窗口上早退画一帧纯背景色
+            //   → "关闭时闪一下"。
+            // - 更早若在 logic 的 reconcile 之后消费 → reconcile 看到 about_open=true
+            //   不发 Visible(false)，ui() 接着把主界面画进仍可见的关于窗 → "闪现主窗内容"。
+            // 改在 ui 阶段（paint_about 之后）消费 + 立即 hide_to_tray，winit 本帧结束
+            // 就藏窗口，下一帧 ui() 跑在已隐藏窗口上，既无纯背景闪、也无主窗内容闪。
+            if crate::about_dialog::take_closed() {
+                let mode = self.lifecycle.borrow().mode;
+                {
+                    let mut lc = self.lifecycle.borrow_mut();
+                    lc.about_open = false;
+                    lc.about_standalone = false;
+                }
+                // 来自托盘的关于（mode=TrayOnly）：连窗口一起藏；主窗可见时
+                // （mode=ShowWindow）只关关于层，主窗下一帧自然接管。
+                if mode == RunMode::TrayOnly {
+                    self.hide_to_tray(&ctx);
+                }
+            }
+            return;
+        }
+
+        self.ensure_ui_resources(&ctx);
         self.toasts.retain(|t| !t.expired());
 
         #[cfg(not(windows))]
@@ -579,6 +1164,11 @@ impl eframe::App for App {
             });
 
         widgets::show_toasts(&ctx, &self.toasts);
+
+        // 主窗内打开的关于（当前无入口，预留）：覆盖在主界面之上的居中模态。
+        if about_open && !about_standalone {
+            crate::about_dialog::paint_about_modal(&ctx);
+        }
     }
 }
 
@@ -657,7 +1247,10 @@ fn title_bar(
                     ui.id().with("titlebar_drag"),
                     egui::Sense::drag(),
                 );
-                if drag_resp.drag_started() {
+                // 用 `is_pointer_button_down_on`（按下当帧就 StartDrag），不要用
+                // `drag_started`——后者要等越过拖拽阈值，系统 mouseDown 已过去，
+                // macOS 上会拖不动窗口（见 about_dialog.rs 同款说明）。
+                if drag_resp.is_pointer_button_down_on() {
                     ctx.send_viewport_cmd(ViewportCommand::StartDrag);
                 }
             }
@@ -707,7 +1300,7 @@ fn sidebar(ui: &mut egui::Ui, _ctx: &egui::Context, app: &mut App) {
         },
         SidebarItem {
             page: Page::FullScan,
-            draw: |p, r, s| icons::hamburger(p, r, s),
+            draw: |p, r, s| icons::computer(p, r, s),
         },
         SidebarItem {
             page: Page::VirusDb,
@@ -803,11 +1396,11 @@ fn dashboard_page(ui: &mut egui::Ui, _ctx: &egui::Context, app: &mut App) {
         widgets::paint_glow(&painter, center, radius, color);
         painter.circle_filled(center, radius, colors::BG_CARD);
         painter.circle_stroke(center, radius, Stroke::new(3.0, color));
-        let glyph_rect = egui::Rect::from_center_size(center, Vec2::splat(DIAMETER * 0.50));
+        let glyph_rect = egui::Rect::from_center_size(center, Vec2::splat(DIAMETER * 0.46));
         if has_threats {
-            icons::warning_triangle(&painter, glyph_rect, Stroke::new(2.4, color), None);
+            icons::status_glyph_at_risk(&painter, glyph_rect, color);
         } else {
-            icons::shield_check(&painter, glyph_rect, Stroke::new(2.4, color));
+            icons::status_glyph_secure(&painter, glyph_rect, color);
         }
 
         ui.add_space(20.0);
@@ -846,7 +1439,7 @@ fn dashboard_page(ui: &mut egui::Ui, _ctx: &egui::Context, app: &mut App) {
                     app.core.borrow_mut().quick.start(removable);
                 }
                 ui.add_space(BTN_GAP);
-                if action_button(ui, "Full Scan", icons::database) {
+                if action_button(ui, "Full Scan", icons::computer) {
                     let removable = app.core.borrow().config.scan_removable_drives;
                     app.navigate(Page::FullScan);
                     app.core.borrow_mut().full.start(removable);
@@ -996,7 +1589,7 @@ fn full_scan_page(ui: &mut egui::Ui, app: &mut App) {
         &mut app.toasts,
         "Full Scan",
         colors::ACCENT_BLUE,
-        icons::hamburger,
+        icons::computer,
         true,
     );
 }
@@ -1057,13 +1650,23 @@ fn scan_page(
                 // 仪表盘页那种"大圆环 + 图标"的视觉语言在这里也来一份，跟概览页
                 // 呼应，不然闪电扫描/全盘扫描的待机画面只有两行字，太空。这里没有
                 // 状态色（还没扫描，谈不上安全/危险），就用页面自己的强调色。
+                const IDLE_RING_GLYPH: f32 = 52.0;
+                // 全盘扫描的电脑图标在小圆环里偏小，单独放大 25%。
+                const FULL_SCAN_IDLE_RING_GLYPH_SCALE: f32 = 1.25;
+                let glyph_size = if state.kind == ScanKind::Full {
+                    IDLE_RING_GLYPH * FULL_SCAN_IDLE_RING_GLYPH_SCALE
+                } else {
+                    IDLE_RING_GLYPH
+                };
+
                 let (deco_resp, painter) =
                     ui.allocate_painter(Vec2::splat(120.0), egui::Sense::hover());
                 let deco_center = deco_resp.rect.center();
                 let deco_radius = 56.0;
                 painter.circle_filled(deco_center, deco_radius, colors::BG_CARD);
                 painter.circle_stroke(deco_center, deco_radius, Stroke::new(2.0, ring_color));
-                let deco_glyph = egui::Rect::from_center_size(deco_center, Vec2::splat(52.0));
+                let deco_glyph =
+                    egui::Rect::from_center_size(deco_center, Vec2::splat(glyph_size));
                 icon(&painter, deco_glyph, Stroke::new(2.0, ring_color));
 
                 ui.add_space(14.0);
@@ -1113,28 +1716,44 @@ fn scan_page(
                 scanned,
                 current_path,
             } => {
-                // clamscan 启动后先加载病毒库（十几秒），这段时间 current_path 是空的、
-                // 一个 FileScanned 都没来。全盘扫描在 walk 磁盘阶段也是空 current_path。
-                // 用旋转不定进度环 + "Preparing scan…" 区分"准备中"和"正在逐文件扫描"；
-                // 两种状态都显示实时已用时长，让用户知道进度在走、不是卡死。
-                let starting = current_path.is_empty();
-                let percent = if starting {
+                // 全盘扫描 walk 阶段：total 尚为 None、尚无 FileScanned。
+                let disk_walking = state.kind == ScanKind::Full
+                    && total.is_none()
+                    && *scanned == 0
+                    && current_path.is_empty();
+
+                let percent = if disk_walking {
                     None
                 } else {
-                    total.map(|t| if t == 0 { 1.0 } else { *scanned as f32 / t as f32 })
+                    total.map(|t| {
+                        if t == 0 {
+                            1.0
+                        } else {
+                            *scanned as f32 / t as f32
+                        }
+                    })
                 };
-                let title_text = if starting {
-                    "Starting".to_string()
+
+                let title_text = if disk_walking {
+                    if state.walk_files_found > 0 {
+                        state.walk_files_found.to_string()
+                    } else {
+                        "…".to_string()
+                    }
                 } else {
                     percent
                         .map(|p| format!("{:.0}%", p * 100.0))
                         .unwrap_or_else(|| format!("{scanned}"))
                 };
-                let heading = if starting {
+
+                let heading = if disk_walking {
+                    format!("Preparing {title}")
+                } else if *scanned == 0 && current_path.is_empty() && state.engine_loading {
                     format!("Starting {title}")
                 } else {
                     format!("Running {title}")
                 };
+
                 widgets::bold_label(ui, &heading, 14.0, colors::TEXT_PRIMARY);
                 ui.add_space(6.0);
                 widgets::progress_ring(
@@ -1143,11 +1762,37 @@ fn scan_page(
                     percent,
                     ring_color,
                     &title_text,
-                    if starting { "scan engine" } else { "" },
+                    if disk_walking {
+                        "inspect files"
+                    } else if *scanned == 0 && current_path.is_empty() && state.engine_loading {
+                        "scan engine"
+                    } else {
+                        ""
+                    },
                 );
                 ui.add_space(4.0);
-                let status_line = if starting {
-                    "Preparing scan…".to_string()
+                let status_line = if let Some(p) = &state.engine_scanning_path {
+                    truncate(p, 60)
+                } else if disk_walking {
+                    if state.walk_files_found > 0 {
+                        format!(
+                            "Finding key files on disk… {n} to scan",
+                            n = state.walk_files_found
+                        )
+                    } else {
+                        "Finding executables on disk…".to_string()
+                    }
+                } else if state.engine_loading && state.engine_loading_remaining > 0 {
+                    format!(
+                        "Loading scan engine ({remaining} files)…",
+                        remaining = state.engine_loading_remaining
+                    )
+                } else if state.engine_loading && !current_path.is_empty() {
+                    format!("{} — loading engine…", truncate(current_path, 48))
+                } else if state.engine_loading {
+                    "Loading scan engine…".to_string()
+                } else if current_path.is_empty() {
+                    "Scanning…".to_string()
                 } else {
                     truncate(current_path, 60)
                 };
@@ -1159,15 +1804,22 @@ fn scan_page(
                 ui.add_space(4.0);
                 if let Some(started) = state.started_at.as_ref() {
                     ui.label(
-                        egui::RichText::new(format!("Elapsed {}", format_duration(started.elapsed())))
-                            .color(colors::TEXT_SECONDARY)
-                            .small(),
+                        egui::RichText::new(format!(
+                            "Elapsed {}",
+                            format_duration(started.elapsed())
+                        ))
+                        .color(colors::TEXT_SECONDARY)
+                        .small(),
                     );
                 }
                 ui.add_space(16.0);
-                let first_pill = match total {
-                    Some(t) => (format!("{scanned} / {t}"), "files"),
-                    None => (scanned.to_string(), "scanned"),
+                let first_pill = if disk_walking {
+                    (state.walk_files_found.to_string(), "to scan")
+                } else {
+                    match total {
+                        Some(t) => (format!("{scanned} / {t}"), "files"),
+                        None => (scanned.to_string(), "scanned"),
+                    }
                 };
                 widgets::centered_stat_pills(
                     ui,
@@ -1178,8 +1830,9 @@ fn scan_page(
                     state.request_cancel();
                 }
                 // 旋转环靠 time 推进、已用时长每秒变化、事件限流后还有积压要继续排空——
-                // 三者都需要持续重绘，否则一停下来界面就静止了。
-                ui.ctx().request_repaint();
+                // 三者都需要持续重绘，否则一停下来界面就静止了。限制在 ~30fps：动画
+                // 仍然流畅，但不会在老机器上按 vsync 满帧率白烧 CPU/GPU。
+                ui.ctx().request_repaint_after(Duration::from_millis(33));
             }
             ScanPhase::Done {
                 scanned,
@@ -1203,11 +1856,11 @@ fn scan_page(
                 widgets::paint_glow(&painter, center, radius, color);
                 painter.circle_filled(center, radius, colors::BG_CARD);
                 painter.circle_stroke(center, radius, Stroke::new(3.0, color));
-                let glyph_rect = egui::Rect::from_center_size(center, Vec2::splat(DIAMETER * 0.50));
+                let glyph_rect = egui::Rect::from_center_size(center, Vec2::splat(DIAMETER * 0.46));
                 if has_threats {
-                    icons::warning_triangle(&painter, glyph_rect, Stroke::new(2.2, color), None);
+                    icons::status_glyph_at_risk(&painter, glyph_rect, color);
                 } else {
-                    icons::shield_check(&painter, glyph_rect, Stroke::new(2.2, color));
+                    icons::status_glyph_secure(&painter, glyph_rect, color);
                 }
                 ui.add_space(14.0);
                 let heading = if *cancelled {
@@ -1293,39 +1946,30 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
         ui.add_space(14.0);
 
         let available = paths::clamscan_available();
+        // 第一次画这一栏时顺带查一次版本（只查这一次，之后靠"更新完成"事件刷新），
+        // 避免每帧都拉起 clamscan 进程。更新成功后 `db_version` 会从旧值刷新成新值。
+        if core.virus_db.db_version.is_none() {
+            core.virus_db.refresh_db_version(ui.ctx().clone());
+        }
         let status = if available {
             "Built-in database ready"
         } else {
             "Scan engine not found"
         };
         let detail_dir = if available {
-            paths::clamav_database_dir()
+            paths::resolved_clamav_database_dir().unwrap_or_else(|| paths::clamav_database_dir())
         } else {
             paths::clamav_dir()
         };
-        let path_display = detail_dir.display().to_string();
+        ui.label(egui::RichText::new(status).color(colors::TEXT_SECONDARY));
 
-        // 状态文字之前包了一层卡片，看起来跟旁边真正能点的按钮长一个样、却点
-        // 不动，容易让人以为是个坏了的按钮——改成裸文字，旁边挂一个小小的图标
-        // 按钮（hover 出完整路径），不用文字说明也够直观，整体不再像个按钮。
-        const INFO_ICON_SIZE: f32 = 26.0;
-        const INFO_GAP: f32 = 8.0;
-        let status_w = widgets::measure_text_width(ui, status, 14.0);
-        // `ui.label(...)` 是个"裸"部件（跟 action_button_width 注释里说的
-        // allocate_painter/allocate_exact_size 一样），egui 会在它后面自动追加
-        // 一份 item_spacing，再叠加下面显式的 `INFO_GAP`——量宽度的时候得把这份
-        // 自动间距也算进去，不然这一行会比按钮行整体偏左几像素。
-        let status_row_w = status_w + ui.spacing().item_spacing.x + INFO_GAP + INFO_ICON_SIZE;
-        ui.allocate_ui_with_layout(
-            Vec2::new(status_row_w, INFO_ICON_SIZE),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                ui.label(egui::RichText::new(status).color(colors::TEXT_SECONDARY));
-                ui.add_space(INFO_GAP);
-                widgets::icon_only_button(ui, INFO_ICON_SIZE, icons::info_circle)
-                    .on_hover_text(path_display.as_str());
-            },
-        );
+        if let Some(ver) = &core.virus_db.db_version {
+            ui.label(
+                egui::RichText::new(format!("Version: {ver}"))
+                    .color(colors::TEXT_MUTED)
+                    .small(),
+            );
+        }
 
         ui.add_space(16.0);
         // "打开所在文件夹"和"手动更新病毒库"放同一行——都是这一栏里的辅助操作，
@@ -1354,7 +1998,7 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
                 }
                 ui.add_space(BTN_GAP);
                 if action_button(ui, update_label, icons::database) && !core.virus_db.updating {
-                    core.virus_db.start_update();
+                    core.virus_db.start_update(ui.ctx().clone());
                     pending_toast = Some("Updating database…".to_string());
                 }
             },

@@ -1,118 +1,98 @@
-//! 轻量「关于」对话框：托盘菜单触发，单独跑一个小的 eframe 会话（用完即释放 OpenGL）。
+//! 轻量「关于」对话框，有两种呈现方式：
+//!
+//! 1. 覆盖层模态（`paint_about_modal`）：画在主界面之上，用于"主窗内打开关于"的场景
+//!    （当前没有入口，预留）。
+//! 2. **独占整个窗口**（`paint_about_fullscreen`）：来自托盘时调用——整个窗口只画关于页、
+//!    不画主界面，背后是深色主题底，看起来就是一张独立的关于窗口；关闭后由
+//!    `App::reconcile_lifecycle` 自动把视口重新藏起来（回到托盘），不会残留主窗口。
+//!
+//! 为什么不用独立的原生子视口（`show_viewport_deferred`）？eframe 在「根视口被
+//! `Visible(false)` 隐藏」时不会为 deferred 子视口创建原生窗口，从托盘弹独立窗口不可靠。
+//! 而"独占主视口"同样能给出"只显示关于页、不要主窗口"的独立观感，且稳定。
 
 use crate::clamav_info::ClamAvInfo;
 use crate::icon_data;
-use crate::theme::{self, colors};
+use crate::theme::colors;
 use crate::widgets;
-use eframe::egui;
-use egui::{TextureHandle, Vec2, ViewportCommand};
+use egui::{Align2, CursorIcon, Frame, Key, Rect, Sense, Stroke, TextureHandle, Vec2, pos2};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const LOGO_TEX_ID: &str = "clv3000_about_logo";
 /// 关于弹窗 logo 的 UI 逻辑尺寸（pt）。
 const LOGO_DISPLAY_PT: f32 = 88.0;
+const SIZE: [f32; 2] = [410.0, 340.0];
 
-/// 阻塞直到用户关闭关于窗。
-pub fn show_standalone() {
-    let info = ClamAvInfo::gather();
-    // 窗口图标在 eframe 启动前设置，拿不到 pixels_per_point，用 128 覆盖常见 2x 屏。
-    let icon = icon_data::load_app_icon(128);
-    let window_icon = egui::IconData {
-        rgba: icon.0.clone(),
-        width: icon.1,
-        height: icon.2,
-    };
+/// 关于窗关闭信号：OK / Esc / 窗口关闭按钮都会置位，`App::logic` 据此关闭覆盖层。
+/// 用全局原子量是因为「关闭」发生在 UI 绘制阶段，而关闭处理在 logic 阶段，二者跨方法，
+/// 全局量最简单。
+static ABOUT_CLOSED: AtomicBool = AtomicBool::new(false);
 
-    let native_options = eframe::NativeOptions {
-        viewport: about_viewport_builder(window_icon),
-        centered: true,
-        ..Default::default()
-    };
-
-    let _ = eframe::run_native(
-        "About CLV3000",
-        native_options,
-        Box::new(move |cc| Ok(Box::new(AboutDialog::new(&cc.egui_ctx, info)))),
-    );
+/// 进程内只采集一次病毒库信息（避免每帧都起 clamscan 子进程）。
+fn cached_info() -> &'static ClamAvInfo {
+    static INFO: std::sync::OnceLock<ClamAvInfo> = std::sync::OnceLock::new();
+    INFO.get_or_init(ClamAvInfo::gather)
 }
 
-fn about_viewport_builder(window_icon: egui::IconData) -> egui::ViewportBuilder {
-    let size = Vec2::new(400.0, 340.0);
-    let mut builder = egui::ViewportBuilder::default()
-        .with_title("About CLV3000")
-        .with_inner_size(size)
-        .with_min_inner_size(size)
-        .with_max_inner_size(size)
-        .with_resizable(false)
-        .with_icon(window_icon);
-
-    #[cfg(windows)]
-    {
-        builder = builder.with_decorations(true);
-    }
-
-    #[cfg(not(windows))]
-    {
-        builder = builder
-            .with_decorations(false)
-            .with_title_shown(false)
-            .with_titlebar_shown(false)
-            .with_titlebar_buttons_shown(false)
-            .with_fullsize_content_view(true);
-    }
-
-    builder
+/// 消费关闭信号：若为 true 则清零并返回 true。
+pub fn take_closed() -> bool {
+    ABOUT_CLOSED.swap(false, Ordering::Relaxed)
 }
 
-struct AboutDialog {
-    info: ClamAvInfo,
-    logo: TextureHandle,
-}
+/// 由 `App::ui` 在 `about_open` 为真时调用，把关于内容画成叠在主界面之上的居中模态窗。
+/// 用户点 OK / 按 Esc / 点窗口关闭按钮即视为关闭，置 `ABOUT_CLOSED`，由 `App::logic`
+/// 据此关掉覆盖层。整窗底色（主界面）由调用方在下方已经画好。
+pub fn paint_about_modal(ctx: &egui::Context) {
+    // 主题（visuals/styles）由 `App::new` 在会话建立时调一次 `theme::apply` 即可，
+    // egui 不会在帧间重置它们。这里曾每帧都 `theme::apply`，会失效 egui 的
+    // visuals/styles 缓存、强制重新布局——关于窗打开期间鼠标移动以满帧率触发重绘，
+    // 每帧重设 visuals 把开销放大成持续微卡顿 + CPU。详见 skill 第 2 节。
 
-impl AboutDialog {
-    fn new(ctx: &egui::Context, info: ClamAvInfo) -> Self {
-        theme::apply(ctx);
-        Self {
-            info,
-            logo: load_logo_texture(ctx),
-        }
-    }
-}
+    let logo = load_logo_texture(ctx);
+    let info = cached_info();
 
-impl eframe::App for AboutDialog {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let mut close = false;
-
-        #[cfg(not(windows))]
-        paint_frameless_chrome(ui, &mut close);
-
-        egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(colors::BG_APP))
-            .show(ui, |ui| {
-                paint_about_body(ui, &self.logo, &self.info);
-                ui.add_space(12.0);
-                ui.vertical_centered(|ui| {
-                    if ok_button(ui).clicked() {
-                        close = true;
-                    }
-                });
+    let mut open = true;
+    egui::Window::new("About CLV3000")
+        .collapsible(false)
+        .resizable(false)
+        .fixed_size(SIZE)
+        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            paint_about_body(ui, &logo, info);
+            ui.add_space(12.0);
+            ui.vertical_centered(|ui| {
+                if ok_button(ui).clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                    ABOUT_CLOSED.store(true, Ordering::Relaxed);
+                }
             });
+        });
 
-        if close {
-            ui.ctx().send_viewport_cmd(ViewportCommand::Close);
-        }
+    // 用户点了窗口自带的关闭按钮（open 被置 false）。
+    if !open {
+        ABOUT_CLOSED.store(true, Ordering::Relaxed);
     }
 }
 
 fn load_logo_texture(ctx: &egui::Context) -> TextureHandle {
+    // 每个会话只解码/上传一次，句柄缓存在 egui 的临时数据区。
+    // 之前每帧都重新解码内嵌 PNG 并重新上传纹理——只要鼠标在关于窗上移动/尝试拖动
+    // （指针事件会以满帧率触发重绘），每帧都重复这份编解码 + GPU 上传的重活，
+    // 表现为"关于窗一开就卡、CPU 飙升"。
+    let key = egui::Id::new(LOGO_TEX_ID);
+    if let Some(handle) = ctx.data_mut(|d| d.get_temp::<TextureHandle>(key)) {
+        return handle;
+    }
     let (rgba, w, h) =
         icon_data::load_app_icon_for_display(LOGO_DISPLAY_PT, ctx.pixels_per_point());
     let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
-    ctx.load_texture(LOGO_TEX_ID, image, egui::TextureOptions::LINEAR)
+    let handle = ctx.load_texture(LOGO_TEX_ID, image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(key, handle.clone()));
+    handle
 }
 
 fn paint_about_body(ui: &mut egui::Ui, logo: &TextureHandle, info: &ClamAvInfo) {
     ui.vertical_centered(|ui| {
-        ui.add_space(8.0);
+        ui.add_space(5.0);
         ui.add(
             egui::Image::new((logo.id(), logo.size_vec2()))
                 .fit_to_exact_size(Vec2::splat(LOGO_DISPLAY_PT))
@@ -158,21 +138,116 @@ fn ok_button(ui: &mut egui::Ui) -> egui::Response {
     )
 }
 
-#[cfg(not(windows))]
-fn paint_frameless_chrome(ui: &mut egui::Ui, close_requested: &mut bool) {
+/// 关于独占窗口的标题栏高度，与 `app.rs` 的 `TITLE_BAR_HEIGHT` 保持一致，
+/// 保证主窗口和关于窗的标题栏观感统一。
+const ABOUT_TITLE_BAR_HEIGHT: f32 = 44.0;
+
+/// 由 `App::ui` 在「来自托盘的关于」（`about_open && about_standalone`）时调用：
+/// 把关于内容画成**独占整个窗口**的页面。macOS 下窗口是无边框的（见 `main.rs` 的
+/// `with_decorations(false)`），没有原生标题栏，所以这里自己画一条与主页风格一致的
+/// 标题栏（标题 + 可拖动 + 关闭按钮），否则关于窗顶部会"没有标题栏"。整窗铺深色主题底
+/// （`BG_APP`），中间居中放一张**固定宽度**的关于卡片。用户点关闭 / OK / 按 Esc 即视为
+/// 关闭，置 `ABOUT_CLOSED`，由 `App::logic` 关掉关于层、再由 `reconcile_lifecycle`
+/// 把视口重新藏回托盘（或恢复原主窗口尺寸）。
+pub fn paint_about_fullscreen(ui: &mut egui::Ui) {
+    let ctx = ui.ctx().clone();
+    // 主题由 `App::new` 调一次 `theme::apply` 即可，不在每帧重复设置——每帧重设
+    // visuals/styles 会失效 egui 缓存、强制重新布局，鼠标在关于窗上移动时以满帧率
+    // 触发重绘，把开销放大成持续卡顿。详见 skill 第 2 节。
+
+    let logo = load_logo_texture(&ctx);
+    let info = cached_info();
+
+    // 顶部自绘标题栏：标题文字在左，关闭按钮在右；除关闭按钮区域外整条可拖动窗口。
     egui::Panel::top("about_title_bar")
-        .exact_size(36.0)
+        .exact_size(ABOUT_TITLE_BAR_HEIGHT)
+        .resizable(false)
         .show_separator_line(false)
         .frame(egui::Frame::default().fill(colors::BG_TITLEBAR))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.add_space(12.0);
-                widgets::bold_label(ui, "About CLV3000", 14.0, colors::TEXT_PRIMARY);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("✕").clicked() {
-                        *close_requested = true;
-                    }
-                });
+            let full_rect = ui.max_rect();
+            let btn_size = 32.0;
+            let edge_margin = 8.0;
+            let close_rect = Rect::from_center_size(
+                pos2(
+                    full_rect.right() - edge_margin - btn_size / 2.0,
+                    full_rect.center().y,
+                ),
+                Vec2::splat(btn_size),
+            );
+            if about_title_close_button(ui, close_rect) {
+                ABOUT_CLOSED.store(true, Ordering::Relaxed);
+            }
+            ui.horizontal_centered(|ui| {
+                ui.add_space(14.0);
+                // 用英文标题：egui 默认字体（default_fonts）不含中文字形，
+                // 中文标题会渲染成豆腐块乱码；界面其余文案也全是英文，保持一致。
+                widgets::bold_label(ui, "About CLV3000", 15.0, colors::TEXT_PRIMARY);
             });
+            // 标题栏（除右侧关闭按钮区域外）可拖动窗口：文字那块叠一个拖拽区。
+            // 注意用 `is_pointer_button_down_on`（按下的那一帧就发 StartDrag），
+            // 不要用 `drag_started`——后者要等指针移动越过拖拽阈值才触发，此时
+            // 系统的 mouseDown 事件早已过去，winit 在 macOS 上做窗口拖动依赖
+            // "当前事件还是那次按下"，晚了就拖不动（表现：标题栏拖不动）。
+            let drag_rect = Rect::from_min_max(
+                pos2(full_rect.left(), full_rect.top()),
+                pos2(close_rect.left() - 4.0, full_rect.bottom()),
+            );
+            if drag_rect.width() > 0.0 {
+                let drag_resp = ui.interact(
+                    drag_rect,
+                    ui.id().with("about_titlebar_drag"),
+                    Sense::drag(),
+                );
+                if drag_resp.is_pointer_button_down_on() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+            }
         });
+
+    egui::CentralPanel::default()
+        .frame(Frame::default().fill(colors::BG_APP))
+        .show(ui, |ui| {
+            // 整窗居中：水平 + 垂直都居中一张固定宽度的卡片（不铺满整窗）。
+            let avail = ui.available_size();
+            let card_w = (avail.x - 48.0).clamp(360.0, 440.0);
+            ui.with_layout(
+                egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                |ui| {
+                    Frame::default()
+                        .fill(colors::BG_CARD)
+                        .corner_radius(16.0)
+                        .inner_margin(egui::Margin::same(28))
+                        .stroke(egui::Stroke::new(1.0, colors::BORDER))
+                        .show(ui, |ui| {
+                            ui.set_width(card_w);
+                            paint_about_body(ui, &logo, info);
+                            ui.add_space(18.0);
+                            ui.vertical_centered(|ui| {
+                                if ok_button(ui).clicked()
+                                    || ui.input(|i| i.key_pressed(Key::Escape))
+                                {
+                                    ABOUT_CLOSED.store(true, Ordering::Relaxed);
+                                }
+                            });
+                        });
+                },
+            );
+        });
+}
+
+/// 关于窗标题栏右侧的关闭按钮（红圈 ×），点击置 `ABOUT_CLOSED`。
+fn about_title_close_button(ui: &mut egui::Ui, rect: Rect) -> bool {
+    let response = ui
+        .interact(rect, ui.id().with("about_close"), Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand);
+    if response.hovered() {
+        ui.painter().rect_filled(rect, 6.0, colors::ACCENT_BLUE_BG);
+    }
+    crate::icons::close(
+        ui.painter(),
+        rect.shrink(9.0),
+        Stroke::new(1.4, colors::TEXT_SECONDARY),
+    );
+    response.clicked()
 }

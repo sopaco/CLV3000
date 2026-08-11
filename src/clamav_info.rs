@@ -1,7 +1,6 @@
 //! 查询内置 ClamAV 引擎与病毒库版本信息（供「关于」对话框展示）。
 
 use crate::paths;
-#[cfg(windows)]
 use std::process::Command;
 
 #[derive(Debug, Clone)]
@@ -16,6 +15,11 @@ impl ClamAvInfo {
             engine: query_engine_version(),
             database: query_database_version(),
         }
+    }
+
+    /// 只查病毒库版本（更新完成后刷新界面用，避免再跑一遍引擎查询）。
+    pub fn database_version() -> String {
+        query_database_version()
     }
 }
 
@@ -62,7 +66,33 @@ fn run_clamscan_version_flag() -> Result<String, String> {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn run_clamscan_version_flag() -> Result<String, String> {
+    let mut cmd = Command::new(paths::clamscan_path());
+    cmd.arg("-V");
+    // macOS 上 ClamAV 的默认库目录通常是空的（手动安装时库在 ~/.clamav），
+    // 不指定 -d 的话 `clamscan -V` 只打印引擎版本、不带 daily 库编号与日期；
+    // 显式传入解析到的库目录，让版本号里带上库信息（如 `1.5.4/28088/...`）。
+    if let Some(db) = paths::resolved_clamav_database_dir() {
+        cmd.arg("-d").arg(db);
+    }
+    let output = cmd
+        .output()
+        .map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stdout.is_empty() {
+        Ok(stdout)
+    } else if !stderr.is_empty() {
+        Ok(stderr)
+    } else if output.status.success() {
+        Ok(String::new())
+    } else {
+        Err(format!("exit {}", output.status))
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn run_clamscan_version_flag() -> Result<String, String> {
     Ok("ClamAV 0.7.0 (dev preview)/10001/Thu Jan  1 00:00:00 2031".to_string())
 }
@@ -93,7 +123,8 @@ fn first_line(text: &str) -> String {
 
 /// 引擎不可用时，尽量从 `database\` 目录里的签名文件推断状态。
 fn summarize_database_files() -> String {
-    let dir = paths::clamav_database_dir();
+    let dir = paths::resolved_clamav_database_dir()
+        .unwrap_or_else(|| paths::clamav_database_dir());
     if !dir.is_dir() {
         return format!("Not found ({})", dir.display());
     }

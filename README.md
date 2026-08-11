@@ -92,29 +92,39 @@ Output: `target/x86_64-pc-windows-gnu/release/clv3000.exe`
 
 > This produces a Windows executable that **cannot** run on macOS/Linux. Tray behavior, process enumeration, and single-instance locking must be verified on a real Windows machine.
 
-## Mock Mode (macOS / Linux)
+## Real Mode (macOS / Windows) vs. Mock Mode (Linux / other)
 
-Run natively on non-Windows systems to preview the UI and interaction flow — no cross-compilation needed:
+The app does **real scanning** on both Windows and macOS — process/module enumeration, disk
+enumeration, the ClamAV engine call, code-signature pre-filtering and single-instance locking
+are all implemented per platform. To build/run natively on macOS (no cross-compile):
 
 ```bash
-cargo run
+cargo run          # macOS: real scanning (needs ClamAV — see below)
 ```
 
-On non-Windows targets, the `windows` crate is excluded from the dependency graph. All Win32-specific logic is replaced with mock implementations:
+On macOS, ClamAV is required: either `brew install clamav` (picked up from `PATH`) or drop a
+portable `clamav/` directory next to the executable (same layout as Windows:
+`clamav/clamscan`, `clamav/freshclam`, `clamav/database/*.cvd`). Without it, the scan page
+reports "engine not found" instead of crashing.
 
-| Module | Windows | Mock (non-Windows) |
-|--------|---------|---------------------|
-| Quick Scan | Real process/module enumeration via `Toolhelp32` | Simulated ~342 processes with generated module lists |
-| Full Scan | Real disk enumeration + file traversal | ~3000 generated fake paths, no filesystem access |
-| Scan Engine | Calls `clamscan.exe` subprocess | Simulated delay, alternating OK/FOUND results across runs |
-| Single-instance Lock | Named Mutex | Always allowed (no lock) |
-| Local Time | `GetLocalTime` | `SystemTime` (UTC, no timezone lookup) |
-| Database Status | Checks for `clamscan.exe` / `freshclam.exe` | Always reports "Ready"; manual update sleeps 1.2s |
-| Config, Tray, UI | Real | Real — same as Windows |
+**Mock Mode** applies only to Linux and other non-Windows, non-macOS targets — used purely to
+preview the UI/interaction flow. There, the `windows` crate is excluded from the dependency
+graph and all Win32-specific logic is replaced with mock implementations:
 
-To see the "threat found" red result page, click "Rescan" multiple times — the mock engine flips its result each run.
+| Module | Windows | macOS | Mock (Linux / other) |
+|--------|---------|-------|----------------------|
+| Quick Scan | Real process/module enumeration via `Toolhelp32` | Real process enumeration via `sysinfo` (running binaries) | Simulated ~342 processes with generated module lists |
+| Full Scan | Real disk enumeration + file traversal | Real mount enumeration (`/` + optional `/Volumes`) + Mach-O detection | ~3000 generated fake paths, no filesystem access |
+| Scan Engine | Calls `clamscan.exe` subprocess | Calls `clamscan` subprocess (PATH or bundled) | Simulated delay, alternating OK/FOUND results across runs |
+| Code-sign pre-filter | `WinVerifyTrust` (PE/catalog) | `codesign --verify` (Mach-O) | n/a |
+| Single-instance Lock | Named Mutex | Unix socket lock in app data dir | Always allowed (no lock) |
+| Local Time | `GetLocalTime` | `SystemTime` (UTC) | `SystemTime` (UTC) |
+| Database Status | Checks for `clamscan.exe` / `freshclam.exe` | Checks for `clamscan` / `freshclam` (PATH or bundled) | Always reports "Ready"; manual update sleeps 1.2s |
+| Config, Tray, UI | Real | Real — same as Windows | Real — same as Windows |
 
-> Mock mode is for UI/interaction preview only. Process counts, file paths, and scan results are synthetic and do not represent real security status.
+To see the "threat found" red result page in Mock Mode, click "Rescan" multiple times — the mock engine flips its result each run.
+
+> Mock mode is for UI/interaction preview only. Process counts, file paths, and scan results are synthetic and do not represent real security status. On macOS/Windows the scans are real (subject to OS permissions such as Full Disk Access on macOS).
 
 ## Verification Checklist
 

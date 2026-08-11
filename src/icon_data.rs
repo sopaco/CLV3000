@@ -34,12 +34,6 @@ pub fn load_app_icon_for_display(
     decode_and_resize(APP_ICON_PNG, target, FilterType::Lanczos3)
 }
 
-/// 解码内嵌的完整品牌图标并缩放到 `size x size`，返回 `(rgba, width, height)`。
-pub fn load_app_icon(size: u32) -> (Vec<u8>, u32, u32) {
-    let target = size.min(APP_ICON_SOURCE_MAX);
-    decode_and_resize(APP_ICON_PNG, target, FilterType::Lanczos3)
-}
-
 /// 解码内嵌的简化版图标（适合小尺寸），返回 `(rgba, width, height)`。
 /// 窗口图标建议大一点（比如 128），托盘图标按系统惯例给小图（比如 32）。
 pub fn load_tray_icon(size: u32) -> (Vec<u8>, u32, u32) {
