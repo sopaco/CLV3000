@@ -12,8 +12,42 @@ pub fn exe_dir() -> PathBuf {
 }
 
 /// 内置便携版 ClamAV 所在目录：`<exe目录>\clamav\`
+///
+/// macOS 打包成 `.app` 后，cargo-bundle 把额外资源放到 `Contents/Resources/`
+/// 而非可执行文件同目录 `Contents/MacOS/`。因此 macOS 上优先检查
+/// `Contents/Resources/clamav`，找不到再退回 exe 同目录（裸二进制 / Windows 绿色版沿用旧逻辑）。
 pub fn clamav_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(bundled) = bundle_resources_clamav_dir() {
+            return bundled;
+        }
+    }
     exe_dir().join("clamav")
+}
+
+/// macOS `.app` 包内：从可执行文件路径 `.../Contents/MacOS/clv3000`
+/// 反推 `.../Contents/Resources/clamav`。非包内运行（如 `cargo run` 的裸二进制、
+/// 或 Windows）返回 None，不影响原有路径逻辑。
+#[cfg(target_os = "macos")]
+fn bundle_resources_clamav_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let macos_dir = exe.parent()?; // .../Contents/MacOS
+    let contents = macos_dir.parent()?; // .../Contents
+    let is_bundle = contents
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == "Contents")
+        .unwrap_or(false)
+        && macos_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n == "MacOS")
+            .unwrap_or(false);
+    if !is_bundle {
+        return None;
+    }
+    Some(contents.join("Resources").join("clamav"))
 }
 
 // 这两个函数 Windows 与 macOS 真实引擎都会用到，mock 路径（Linux 等）用不到，

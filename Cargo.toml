@@ -66,3 +66,16 @@ CompanyName     = "SGNetworks"
 LegalCopyright  = "Copyright © 2026 SGNetworks"
 InternalName    = "clv3000"
 OriginalFilename = "clv3000.exe"
+
+# macOS 应用包（.app）配置，由 `cargo bundle` 读取，产出带图标的 CLV3000.app。
+# 图标走 `icon`（文件本身在 assets/icons/icon_app.icns）；Info.plist 由 cargo-bundle 自动生成。
+# 注意：此处**不**写 `resources = ["clamav"]`——clamav/ 在 .gitignore 里且仓库根通常不存在，
+# 写死会导致 `cargo bundle` 在缺少该目录时报错。打包时自带引擎改由 scripts/bundle-macos.sh
+# 在打包完成后再把本地 clamav/ 拷进 Contents/Resources/clamav（见脚本）。
+[package.metadata.bundle]
+name         = "CLV3000"
+identifier   = "com.sgnetworks.clv3000"
+icon         = ["assets/icons/icon_app.icns"]
+category     = "Utility"
+short_description = "Fast, reliable virus protection for even older PCs."
+copyright    = "Copyright © 2026 SGNetworks"
