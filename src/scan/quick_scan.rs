@@ -18,6 +18,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
+use std::time::Instant;
 
 #[cfg(windows)]
 use real_windows::{modules_of_process, snapshot_pids};
@@ -33,6 +34,7 @@ use mock::{modules_of_process, snapshot_pids};
 ///    这样才能给出准确的"总数"，UI 上才能画出确定的百分比进度环。
 /// 2. 枚举完成后把文件列表交给 clamscan 一次性扫描（engine.rs 写入临时文件 + --file-list）。
 pub fn run(tx: Sender<ScanEvent>, cancel: CancelFlag) {
+    let start = Instant::now();
     let pids = snapshot_pids();
     let processes_total = pids.len();
     let mut seen_paths: HashSet<PathBuf> = HashSet::new();
@@ -67,9 +69,18 @@ pub fn run(tx: Sender<ScanEvent>, cancel: CancelFlag) {
         });
     }
 
+    let total_files = ordered_paths.len();
+    if total_files == 0 {
+        let _ = tx.send(ScanEvent::Finished {
+            scanned: 0,
+            elapsed: start.elapsed(),
+            cancelled: cancel.load(Ordering::SeqCst),
+        });
+        return;
+    }
+
     // 枚举已经完成，文件总数已知。先发 ScanStarted 让 UI 立刻从 "Enumerating" 切到
     // "Scanning"，否则 clamscan 加载病毒库的十几秒里 UI 会一直显示 "Enumerating N/N"。
-    let total_files = ordered_paths.len();
     let _ = tx.send(ScanEvent::ScanStarted {
         total: Some(total_files),
     });

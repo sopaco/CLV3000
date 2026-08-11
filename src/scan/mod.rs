@@ -45,18 +45,10 @@ pub enum ScanEvent {
     ScanStarted {
         total: Option<usize>,
     },
-    /// 预筛进行中：已对 `analyzed` / `total` 个文件做了基因哈希 + 缓存/签名校验。
-    /// 此阶段不发 `FileScanned`，UI 用此事件驱动「分析文件」进度，避免一直停在 0/N。
-    PrefilterProgress {
-        analyzed: usize,
-        total: usize,
-    },
-    /// 预筛（基因缓存 + 可信签名）完成：skipped 个文件即将通过 `FileScanned` 上报结果，
-    /// pending 个文件仍需 clamscan。UI 据此在 pending>0 且 clamscan 尚无 stdout 产出时
-    /// 显示「正在加载引擎」，避免进度已 99% 但病毒库仍在加载时看起来像卡在最后几个文件。
-    PrefetchComplete {
-        skipped: usize,
-        pending: usize,
+    /// clamscan 已启动、病毒库加载中；尚有 `remaining` 个文件待在引擎内扫描。
+    /// 不切换 UI 阶段，进度仍随 `FileScanned` / `ScanningFile` 推进。
+    EngineLoading {
+        remaining: usize,
     },
     /// clamscan `-v` 的 `Scanning <path>` 行：文件已开始扫但尚未产出 OK/FOUND 行。
     ScanningFile {

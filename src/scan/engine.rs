@@ -45,6 +45,17 @@ mod real {
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
+    /// 预筛结束后交给后台线程执行的 clamscan 批次。
+    struct ClamscanWork {
+        to_scan: Vec<PathBuf>,
+        hash_by_path: HashMap<String, String>,
+        cache: cache::ScanCache,
+        scanned: usize,
+    }
+
+    /// 后台线程返回值（`run_clamscan_batch` 始终返回 `Some`）。
+    type ClamscanOutcome = (usize, cache::ScanCache, Option<String>);
+
     // `creation_flags` 只在 Windows 上有意义；非 Windows 构建不需要这个 trait，门控掉避免 unused import。
     #[cfg(windows)]
     use std::os::windows::process::CommandExt;
@@ -80,6 +91,16 @@ mod real {
             return;
         }
 
+        // 枚举阶段未发现任何可扫文件：直接结束，不打开缓存、不碰 clamscan。
+        if paths.is_empty() {
+            let _ = tx.send(ScanEvent::Finished {
+                scanned: 0,
+                elapsed: start.elapsed(),
+                cancelled: false,
+            });
+            return;
+        }
+
         // ── 文件基因缓存：按内容哈希复用上次结果，重复扫描近乎免费 ──
         // 大于这个体积的文件不进缓存（避免无谓地哈希大文件）；它们仍会被 ClamAV 正常扫描。
         const CACHE_SKIP_SIZE: u64 = 64 * 1024 * 1024;
@@ -94,61 +115,58 @@ mod real {
         // 缓存不可用不会阻断扫描：open 内部失败会退化为空缓存，insert 失败也会静默忽略。
         let mut cache = cache::ScanCache::open(&cache_path, &effective_db);
 
-        // 预筛：分类为「可直接判定」与「需 clamscan」两类。先静默收集、不立刻发
-        // FileScanned——若先把缓存/签名命中全发出去，进度会冲到 99%，UI 看起来像卡在
-        // 「最后一个文件」，实际 clamscan 还在加载病毒库或尚未开始扫剩余文件。
+        // 按路径列表顺序逐个处理：缓存/签名可即时判定的立刻发 `FileScanned`，
+        // 需 clamscan 的记入待扫列表——对用户呈现为统一的「逐文件检测」进度。
         let mut to_scan: Vec<PathBuf> = Vec::new();
         let mut hash_by_path: HashMap<String, String> = HashMap::new();
-        let mut immediate: Vec<(String, Option<String>)> = Vec::new();
-        let prefilter_total = paths.len();
-        for (i, p) in paths.iter().enumerate() {
+        for p in &paths {
             if cancel.load(Ordering::SeqCst) {
                 finish_scan(start, scanned, &cancel, &tx, cache, None);
                 return;
             }
+            let path_str = p.display().to_string();
+            let _ = tx.send(ScanEvent::ScanningFile {
+                path: path_str.clone(),
+            });
             let too_big = std::fs::metadata(p)
                 .map(|m| m.len() > CACHE_SKIP_SIZE)
                 .unwrap_or(false);
             if too_big {
                 to_scan.push(p.clone());
-            } else {
-                match cache::file_hash(p) {
-                    Some(hash) => {
-                        if let Some(res) = cache.lookup(&hash) {
-                            let infected = if res == "clean" { None } else { Some(res) };
-                            immediate.push((p.display().to_string(), infected));
-                        } else if authenticode::is_trusted_signed(p) {
-                            immediate.push((p.display().to_string(), None));
-                            cache.insert(&hash, "clean");
-                        } else {
-                            hash_by_path.insert(p.display().to_string(), hash);
-                            to_scan.push(p.clone());
-                        }
+                continue;
+            }
+            match cache::file_hash(p) {
+                Some(hash) => {
+                    if let Some(res) = cache.lookup(&hash) {
+                        let infected = if res == "clean" { None } else { Some(res) };
+                        scanned += 1;
+                        let _ = tx.send(ScanEvent::FileScanned {
+                            path: p.display().to_string(),
+                            infected,
+                        });
+                        continue;
                     }
-                    None => {
-                        to_scan.push(p.clone());
+                    if authenticode::is_trusted_signed(p) {
+                        scanned += 1;
+                        let _ = tx.send(ScanEvent::FileScanned {
+                            path: p.display().to_string(),
+                            infected: None,
+                        });
+                        cache.insert(&hash, "clean");
+                        continue;
                     }
+                    hash_by_path.insert(p.display().to_string(), hash);
+                    to_scan.push(p.clone());
+                }
+                None => {
+                    to_scan.push(p.clone());
                 }
             }
-            let _ = tx.send(ScanEvent::PrefilterProgress {
-                analyzed: i + 1,
-                total: prefilter_total,
-            });
         }
 
-        // 小文件先扫、大文件后扫：收尾阶段每个文件耗时更短，减少「卡在最后几个」的体感。
-        to_scan.sort_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(u64::MAX));
-
-        let skipped = immediate.len();
         let pending = to_scan.len();
-        let _ = tx.send(ScanEvent::PrefetchComplete { skipped, pending });
 
-        for (path, infected) in immediate {
-            scanned += 1;
-            let _ = tx.send(ScanEvent::FileScanned { path, infected });
-        }
-
-        // 全部命中缓存/签名：无需启动 clamscan（省掉加载病毒库的十几秒）。
+        // 预筛后无需 clamscan（全部命中基因缓存 / 可信签名）：跳过 spawn 与病毒库加载。
         if pending == 0 {
             finish_scan(start, scanned, &cancel, &tx, cache, None);
             return;
@@ -159,13 +177,48 @@ mod real {
             return;
         }
 
-        // ClamAV 1.5.x 不支持 `--file-list=-`（stdin），必须写入实际临时文件。
+        let (final_scanned, final_cache, stderr) = run_clamscan_batch(
+            ClamscanWork {
+                to_scan,
+                hash_by_path,
+                cache,
+                scanned,
+            },
+            &tx,
+            &cancel,
+            &resolved_db,
+        );
+        finish_scan(
+            start,
+            final_scanned,
+            &cancel,
+            &tx,
+            final_cache,
+            stderr.as_deref(),
+        );
+    }
+
+    /// 执行 clamscan 批次。每次 spawn 都是新进程，须重新加载病毒库（约数秒）；
+    /// 与预筛是否并行无关——子进程退出后内存中的库即释放。
+    fn run_clamscan_batch(
+        work: ClamscanWork,
+        tx: &Sender<ScanEvent>,
+        cancel: &CancelFlag,
+        resolved_db: &Option<PathBuf>,
+    ) -> ClamscanOutcome {
+        let mut scanned = work.scanned;
+        let mut cache = work.cache;
+        let to_scan = work.to_scan;
+        let hash_by_path = work.hash_by_path;
+        let pending = to_scan.len();
+
+        let _ = tx.send(ScanEvent::EngineLoading { remaining: pending });
+
         let temp_path = std::env::temp_dir()
             .join(format!("clv3000_scanlist_{}.txt", std::process::id()));
         if let Err(e) = write_path_list(&temp_path, &to_scan) {
             let _ = tx.send(ScanEvent::Error(format!("Failed to write scan list: {e}")));
-            finish_scan(start, scanned, &cancel, &tx, cache, None);
-            return;
+            return (scanned, cache, None);
         }
 
         let mut cmd = Command::new(paths::clamscan_path());
@@ -173,7 +226,7 @@ mod real {
             .arg("-v")
             .arg("--stdout")
             .arg(format!("--file-list={}", temp_path.display()));
-        if let Some(db) = &resolved_db {
+        if let Some(db) = resolved_db {
             cmd.arg(format!("--database={}", db.display()));
         }
         apply_scan_flags(&mut cmd);
@@ -186,8 +239,7 @@ mod real {
             Err(e) => {
                 let _ = std::fs::remove_file(&temp_path);
                 let _ = tx.send(ScanEvent::Error(format!("Failed to start scan engine: {e}")));
-                finish_scan(start, scanned, &cancel, &tx, cache, None);
-                return;
+                return (scanned, cache, None);
             }
         };
 
@@ -197,8 +249,7 @@ mod real {
                 let _ = child.kill();
                 let _ = std::fs::remove_file(&temp_path);
                 let _ = tx.send(ScanEvent::Error("Failed to read scan engine stdout".to_string()));
-                finish_scan(start, scanned, &cancel, &tx, cache, None);
-                return;
+                return (scanned, cache, None);
             }
         };
         let stderr = child.stderr.take();
@@ -264,7 +315,12 @@ mod real {
         }
 
         let _ = std::fs::remove_file(&temp_path);
-        finish_scan(start, scanned, &cancel, &tx, cache, Some(&stderr_output));
+        let stderr = if stderr_output.is_empty() {
+            None
+        } else {
+            Some(stderr_output)
+        };
+        (scanned, cache, stderr)
     }
 
     /// 先发 `Finished` 让 UI 立刻进入 Done，再在后台线程落盘基因缓存（避免 compact
@@ -372,11 +428,6 @@ mod mock {
     pub fn run(paths: Vec<PathBuf>, tx: Sender<ScanEvent>, cancel: CancelFlag) {
         let start = Instant::now();
         let should_flag = RUN_COUNTER.fetch_add(1, Ordering::Relaxed).is_multiple_of(2);
-
-        let _ = tx.send(ScanEvent::PrefetchComplete {
-            skipped: 0,
-            pending: paths.len(),
-        });
 
         let mut scanned = 0usize;
         let mut flagged = false;

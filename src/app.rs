@@ -68,18 +68,12 @@ struct ScanPageState {
     /// 上一帧这个页面实际画出来的内容高度，给 `widgets::vertically_centered` 用来
     /// 算这一帧该留多少顶部空白。见该函数文档注释。
     content_height: f32,
-    /// 预筛后仍需 clamscan 的文件数；0 表示全部命中缓存/签名。
-    clamscan_pending: usize,
-    /// 预筛阶段尚未上报的 FileScanned 条数（区分缓存命中 vs clamscan 产出）。
-    prefetch_remaining: usize,
-    /// clamscan 已产出结果的文件数。
-    clamscan_done: usize,
-    /// clamscan `-v` 的 `Scanning <path>` 行：文件正在扫但尚未出结果。
+    /// clamscan 已 spawn、病毒库加载中（`EngineLoading` 置位，`ScanningFile` 清除）。
+    engine_loading: bool,
+    /// `EngineLoading` 携带的待引擎扫描文件数（仅用于状态行提示）。
+    engine_loading_remaining: usize,
+    /// clamscan `-v` 的 `Scanning <path>` 行：当前正在引擎内检测的文件。
     engine_scanning_path: Option<String>,
-    /// 预筛（基因哈希 + 缓存/签名校验）是否已完成。
-    prefetch_done: bool,
-    /// 预筛阶段已分析的文件数（由 `PrefilterProgress` 更新）。
-    prefilter_analyzed: usize,
 }
 
 impl ScanPageState {
@@ -93,12 +87,9 @@ impl ScanPageState {
             last_error: None,
             started_at: None,
             content_height: 0.0,
-            clamscan_pending: 0,
-            prefetch_remaining: 0,
-            clamscan_done: 0,
+            engine_loading: false,
+            engine_loading_remaining: 0,
             engine_scanning_path: None,
-            prefetch_done: false,
-            prefilter_analyzed: 0,
         }
     }
 
@@ -116,13 +107,9 @@ impl ScanPageState {
         self.threats.clear();
         self.last_error = None;
         self.started_at = Some(Instant::now());
-        self.clamscan_pending = 0;
-        self.prefetch_remaining = 0;
-        self.clamscan_done = 0;
+        self.engine_loading = false;
+        self.engine_loading_remaining = 0;
         self.engine_scanning_path = None;
-        // 全盘扫描先 walk 磁盘，此时不算引擎预筛；闪电扫描枚举完即进入预筛。
-        self.prefetch_done = self.kind == ScanKind::Full;
-        self.prefilter_analyzed = 0;
         let cancel = scan::new_cancel_flag();
         let (tx, rx) = std::sync::mpsc::channel();
         self.cancel = Some(cancel.clone());
@@ -183,47 +170,30 @@ impl ScanPageState {
                     };
                 }
                 ScanEvent::ScanStarted { total } => {
-                    self.clamscan_pending = 0;
-                    self.prefetch_remaining = 0;
-                    self.clamscan_done = 0;
+                    self.engine_loading = false;
+                    self.engine_loading_remaining = 0;
                     self.engine_scanning_path = None;
-                    self.prefetch_done = false;
-                    self.prefilter_analyzed = 0;
                     self.phase = ScanPhase::Scanning {
                         total,
                         scanned: 0,
                         current_path: String::new(),
                     };
                 }
-                ScanEvent::PrefilterProgress { analyzed, total } => {
-                    self.prefetch_done = false;
-                    self.prefilter_analyzed = analyzed;
-                    if let ScanPhase::Scanning { total: phase_total, .. } = &mut self.phase {
-                        if phase_total.is_none() {
-                            *phase_total = Some(total);
-                        }
-                    }
-                }
-                ScanEvent::PrefetchComplete { skipped, pending } => {
-                    self.prefetch_done = true;
-                    self.clamscan_pending = pending;
-                    self.prefetch_remaining = skipped;
-                    self.clamscan_done = 0;
+                ScanEvent::EngineLoading { remaining } => {
+                    self.engine_loading = true;
+                    self.engine_loading_remaining = remaining;
                     self.engine_scanning_path = None;
                 }
                 ScanEvent::ScanningFile { path } => {
+                    self.engine_loading = false;
                     self.engine_scanning_path = Some(path.clone());
                     if let ScanPhase::Scanning { current_path, .. } = &mut self.phase {
                         *current_path = path;
                     }
                 }
                 ScanEvent::FileScanned { path, infected } => {
-                    if self.prefetch_remaining > 0 {
-                        self.prefetch_remaining -= 1;
-                    } else {
-                        self.clamscan_done += 1;
-                        self.engine_scanning_path = None;
-                    }
+                    self.engine_loading = false;
+                    self.engine_scanning_path = None;
                     let total_hint = match &self.phase {
                         ScanPhase::Enumerating { files_found, .. } => Some(*files_found),
                         ScanPhase::Scanning { total, .. } => *total,
@@ -1573,37 +1543,16 @@ fn scan_page(
                 scanned,
                 current_path,
             } => {
-                let prefiltering = !state.prefetch_done;
-                let disk_walking = prefiltering
-                    && total.is_none()
-                    && *scanned == 0
-                    && current_path.is_empty()
-                    && state.clamscan_pending == 0
-                    && state.prefilter_analyzed == 0;
-                let engine_loading = state.prefetch_done
-                    && state.clamscan_pending > 0
-                    && state.clamscan_done == 0
-                    && state.engine_scanning_path.is_none();
+                // 全盘扫描 walk 磁盘阶段：尚无文件总数与路径。
+                let disk_walking = total.is_none() && *scanned == 0 && current_path.is_empty();
 
-                let percent = if prefiltering && !disk_walking {
-                    total.map(|t| {
-                        if t == 0 {
-                            0.0
-                        } else {
-                            state.prefilter_analyzed as f32 / t as f32
-                        }
-                    })
-                } else if engine_loading || disk_walking {
+                let percent = if disk_walking {
                     None
                 } else {
                     total.map(|t| if t == 0 { 1.0 } else { *scanned as f32 / t as f32 })
                 };
 
-                let title_text = if prefiltering && !disk_walking {
-                    percent
-                        .map(|p| format!("{:.0}%", p * 100.0))
-                        .unwrap_or_else(|| state.prefilter_analyzed.to_string())
-                } else if engine_loading || disk_walking {
+                let title_text = if disk_walking {
                     "Starting".to_string()
                 } else {
                     percent
@@ -1611,9 +1560,7 @@ fn scan_page(
                         .unwrap_or_else(|| format!("{scanned}"))
                 };
 
-                let heading = if prefiltering && !disk_walking {
-                    format!("Analyzing {title}")
-                } else if engine_loading || disk_walking {
+                let heading = if disk_walking {
                     format!("Starting {title}")
                 } else {
                     format!("Running {title}")
@@ -1627,15 +1574,24 @@ fn scan_page(
                     percent,
                     ring_color,
                     &title_text,
-                    if engine_loading || disk_walking { "scan engine" } else { "" },
+                    if disk_walking { "scan engine" } else { "" },
                 );
                 ui.add_space(4.0);
                 let status_line = if let Some(p) = &state.engine_scanning_path {
                     truncate(p, 60)
-                } else if prefiltering && !disk_walking {
-                    "Analyzing files…".to_string()
-                } else if engine_loading || disk_walking {
+                } else if disk_walking {
                     "Preparing scan…".to_string()
+                } else if state.engine_loading && state.engine_loading_remaining > 0 {
+                    format!(
+                        "Loading scan engine ({remaining} files)…",
+                        remaining = state.engine_loading_remaining
+                    )
+                } else if state.engine_loading && !current_path.is_empty() {
+                    format!("{} — loading engine…", truncate(current_path, 48))
+                } else if state.engine_loading {
+                    "Loading scan engine…".to_string()
+                } else if current_path.is_empty() {
+                    "Scanning…".to_string()
                 } else {
                     truncate(current_path, 60)
                 };
@@ -1653,16 +1609,9 @@ fn scan_page(
                     );
                 }
                 ui.add_space(16.0);
-                let first_pill = if prefiltering && !disk_walking {
-                    match total {
-                        Some(t) => (format!("{} / {t}", state.prefilter_analyzed), "analyzed"),
-                        None => (state.prefilter_analyzed.to_string(), "analyzed"),
-                    }
-                } else {
-                    match total {
-                        Some(t) => (format!("{scanned} / {t}"), "files"),
-                        None => (scanned.to_string(), "scanned"),
-                    }
+                let first_pill = match total {
+                    Some(t) => (format!("{scanned} / {t}"), "files"),
+                    None => (scanned.to_string(), "scanned"),
                 };
                 widgets::centered_stat_pills(
                     ui,
