@@ -1805,29 +1805,7 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
         } else {
             paths::clamav_dir()
         };
-        let path_display = detail_dir.display().to_string();
-
-        // 状态文字之前包了一层卡片，看起来跟旁边真正能点的按钮长一个样、却点
-        // 不动，容易让人以为是个坏了的按钮——改成裸文字，旁边挂一个小小的图标
-        // 按钮（hover 出完整路径），不用文字说明也够直观，整体不再像个按钮。
-        const INFO_ICON_SIZE: f32 = 26.0;
-        const INFO_GAP: f32 = 8.0;
-        let status_w = widgets::measure_text_width(ui, status, 14.0);
-        // `ui.label(...)` 是个"裸"部件（跟 action_button_width 注释里说的
-        // allocate_painter/allocate_exact_size 一样），egui 会在它后面自动追加
-        // 一份 item_spacing，再叠加下面显式的 `INFO_GAP`——量宽度的时候得把这份
-        // 自动间距也算进去，不然这一行会比按钮行整体偏左几像素。
-        let status_row_w = status_w + ui.spacing().item_spacing.x + INFO_GAP + INFO_ICON_SIZE;
-        ui.allocate_ui_with_layout(
-            Vec2::new(status_row_w, INFO_ICON_SIZE),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                ui.label(egui::RichText::new(status).color(colors::TEXT_SECONDARY));
-                ui.add_space(INFO_GAP);
-                widgets::icon_only_button(ui, INFO_ICON_SIZE, icons::info_circle)
-                    .on_hover_text(path_display.as_str());
-            },
-        );
+        ui.label(egui::RichText::new(status).color(colors::TEXT_SECONDARY));
 
         if let Some(ver) = &core.virus_db.db_version {
             ui.label(
