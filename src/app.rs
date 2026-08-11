@@ -865,7 +865,9 @@ impl App {
             // 有窗口：必须是 Regular（Dock 图标 + 前台菜单），并确保窗口可见。
             #[cfg(target_os = "macos")]
             crate::macos_reopen::set_accessory(false);
-            if self.window_hidden {
+            // 记下"本帧是否刚从隐藏变为可见"——这是"窗口被打开"的判定，用于统一居中。
+            let just_shown = self.window_hidden;
+            if just_shown {
                 ctx.send_viewport_cmd(ViewportCommand::Visible(true));
                 self.window_hidden = false;
                 // 从托盘（隐藏）唤回：接下来若干帧反复把窗口提到最前
@@ -875,7 +877,8 @@ impl App {
             // 关于独占窗口用较小的尺寸，主窗口用默认尺寸；只在「尺寸意图」变化时发
             // 指令，避免每帧都重置、干扰用户对主窗口的手动缩放。
             let intent = if about_open && about_standalone { 1 } else { 0 };
-            if intent != self.size_intent {
+            let intent_changed = intent != self.size_intent;
+            if intent_changed {
                 let size = if intent == 1 {
                     ABOUT_WINDOW_SIZE
                 } else {
@@ -883,14 +886,27 @@ impl App {
                 };
                 ctx.send_viewport_cmd(ViewportCommand::InnerSize(size.into()));
                 self.size_intent = intent;
-                if intent == 1 {
-                    // 关于窗刚打开：挪到屏幕正中央（只在这个边沿挪一次，之后用户可以
-                    // 自由拖动，不会被反复拽回中心）。无边框窗口 OuterPosition 即内容
-                    // 区左上角；取所在显示器的尺寸算居中。
-                    if let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) {
-                        let origin = ((monitor - Vec2::from(size)) / 2.0).max(Vec2::ZERO);
-                        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(origin.to_pos2()));
-                    }
+            }
+            // 统一居中：窗口刚从隐藏显示（"打开"），或尺寸意图变化（主窗↔关于窗切换）
+            // 时，都把窗口挪到所在显示器正中央。两类触发都是边沿条件，用户拖动后停留
+            // 在同尺寸窗口/同一可见周期内不会被反复拽回中心。
+            //
+            // 之前只在「关于打开」(intent==1) 时居中，导致"从托盘开关于→关关于→再开
+            // 主窗"时主窗只收到 `InnerSize` 不收 `OuterPosition`，于是继承了关于窗
+            // （更小、已居中）的左上角，更大的主窗看上去就偏到屏幕右下角——即用户
+            // 报告的"主窗口位置偏了、对齐了前一个关于窗口的左上角"现象。
+            if just_shown || intent_changed {
+                let size = if intent == 1 {
+                    ABOUT_WINDOW_SIZE
+                } else {
+                    MAIN_WINDOW_SIZE
+                };
+                // 无边框窗口 OuterPosition 即内容区左上角；取所在显示器的尺寸算居中。
+                // 首次显示时若 winit 还没给出 monitor（--tray-only 启动后第一次唤回），
+                // 这里 `None` 跳过，由 `NativeOptions::centered` 兜底。
+                if let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) {
+                    let origin = ((monitor - Vec2::from(size)) / 2.0).max(Vec2::ZERO);
+                    ctx.send_viewport_cmd(ViewportCommand::OuterPosition(origin.to_pos2()));
                 }
             }
         } else if !self.window_hidden {
