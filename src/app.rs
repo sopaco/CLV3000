@@ -26,6 +26,17 @@ const MAIN_WINDOW_SIZE: [f32; 2] = [900.0, 600.0];
 /// `about_dialog::paint_about_fullscreen`）。注意要 ≥ `main.rs` 里的 `min_inner_size`。
 const ABOUT_WINDOW_SIZE: [f32; 2] = [480.0, 460.0];
 
+/// 从托盘唤回窗口后的「置顶倒计时」帧数。macOS 14+ 下单次 `activate()` 抢不到
+/// 焦点，需要连续若干帧 `orderFrontRegardless` 才稳定（12 帧 ≈ 360ms）。Windows
+/// 下由 wakeup 线程在用户手势权限窗口内直接 `SetForegroundWindow`（主路径），
+/// 这里只需 2 帧兜底：第 1 帧窗口可能还没真正可见（`Visible(true)` 是异步的），
+/// 第 2 帧窗口已可见、`AttachThreadInput` 把它拉到前台。更多的帧会导致
+/// `AttachThreadInput` 反复 attach/detach → 标题栏闪动 + 最终失焦。
+#[cfg(target_os = "macos")]
+const ACTIVATE_FRAMES: u8 = 12;
+#[cfg(not(target_os = "macos"))]
+const ACTIVATE_FRAMES: u8 = 2;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Page {
     Dashboard,
@@ -832,7 +843,7 @@ impl App {
         };
 
         if tray_focus {
-            self.activate_countdown = self.activate_countdown.max(12);
+            self.activate_countdown = self.activate_countdown.max(ACTIVATE_FRAMES);
         }
 
         match next_mode {
@@ -880,7 +891,7 @@ impl App {
                 self.window_hidden = false;
                 // 从托盘（隐藏）唤回：接下来若干帧反复把窗口提到最前
                 // （Accessory→Regular 切换 + macOS 14 激活策略变化，单次 activate 不够）。
-                self.activate_countdown = 12;
+                self.activate_countdown = ACTIVATE_FRAMES;
             }
             // 关于独占窗口用较小的尺寸，主窗口用默认尺寸；只在「尺寸意图」变化时发
             // 指令，避免每帧都重置、干扰用户对主窗口的手动缩放。
@@ -995,7 +1006,7 @@ impl eframe::App for App {
         #[cfg(target_os = "macos")]
         if self.sync_macos_minimized_viewport(ctx) {
             // Dock 点回最小化窗口：与托盘唤回类似，连续几帧置顶更稳。
-            self.activate_countdown = self.activate_countdown.max(12);
+            self.activate_countdown = self.activate_countdown.max(ACTIVATE_FRAMES);
         }
 
         #[cfg(target_os = "macos")]
@@ -1004,7 +1015,7 @@ impl eframe::App for App {
             // 窗口已可见但被其它 App 盖住时，点 Dock / Cmd+Tab 只会激活 App、不会自动
             // 把 winit 窗口浮到最前；检测到 inactive→active 且非托盘隐藏态时主动置顶。
             if active && !self.macos_was_active && !self.window_hidden {
-                self.activate_countdown = self.activate_countdown.max(12);
+                self.activate_countdown = self.activate_countdown.max(ACTIVATE_FRAMES);
             }
             self.macos_was_active = active;
         }
@@ -1017,7 +1028,6 @@ impl eframe::App for App {
         // 同时 `request_repaint_after(30ms)` 会因倒计数不清零而持续触发，造成闲置 CPU。
         if self.activate_countdown > 0 {
             if !self.window_hidden {
-                #[cfg(target_os = "macos")]
                 crate::macos_reopen::bring_to_front();
                 self.activate_countdown -= 1;
             } else {
@@ -1059,10 +1069,15 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
 
         // 关闭按钮：关于打开时只关关于层（绝不连带关主窗口）；否则（且非真正退出）
-        // 最小化到托盘。
+        // 最小化到托盘。真正退出（Quit 模式）时不发 CancelClose——让 winit 的 Close
+        // 真正生效，否则 CancelClose 会把 reconcile_lifecycle 发出的 Close 撤掉，程序
+        // 永远退不出去。
         if ctx.input(|i| i.viewport().close_requested()) {
-            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            if self.lifecycle.borrow().about_open {
+            let is_quit = self.lifecycle.borrow().mode == RunMode::Quit || self.allow_exit;
+            if is_quit {
+                // 真正退出：不 CancelClose，让窗口关闭、eframe 会话结束、main loop 退出。
+            } else if self.lifecycle.borrow().about_open {
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
                 let mode = self.lifecycle.borrow().mode;
                 {
                     let mut lc = self.lifecycle.borrow_mut();
@@ -1075,7 +1090,8 @@ impl eframe::App for App {
                     self.hide_to_tray(&ctx);
                 }
                 return;
-            } else if self.lifecycle.borrow().mode != RunMode::Quit && !self.allow_exit {
+            } else {
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
                 self.hide_to_tray(&ctx);
                 return;
             }

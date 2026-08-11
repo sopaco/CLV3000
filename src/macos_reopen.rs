@@ -1,15 +1,12 @@
-//! macOS 专属：控制 App 的「激活策略（activation policy）」，实现"关闭窗口后只留托盘、
-//! 不再占用 Dock"的行为。
+//! 跨平台的"窗口置顶 / 激活策略"适配层：
 //!
-//! 背景：本项目把"关闭窗口"实现成 `ViewportCommand::Visible(false)`（窗口藏起来、
-//! eframe 会话不销毁）。但这样 App 仍是一个 Regular（有 Dock 图标、有菜单栏）的 App，
-//! 用户点 Dock 图标或 Cmd+Tab 仍会试图唤回窗口——而 winit 0.30 不处理 macOS 的 dock
-//! 重新打开事件，导致窗口藏起来后点 Dock 唤不回来。
-//!
-//! 做法：进托盘态（窗口隐藏）时把激活策略切到 `Accessory`（菜单栏小工具模式，无 Dock
-//! 图标、无前台菜单），这样 App 在托盘态下**根本不在 Dock 上**，既不占 Dock、点 Dock
-//! 也自然无从谈起；需要时（托盘点"显示主窗口"）再切回 `Regular` 并显示窗口。这一招
-//! 同时满足了用户的需求——"关闭窗口后只留托盘即可，不必再占 Dock"。
+//! - **macOS**：控制 App 的「激活策略（activation policy）」，实现"关闭窗口后只留托盘、
+//!   不再占用 Dock"的行为。进托盘态时切到 `Accessory`（无 Dock 图标），唤回时切回
+//!   `Regular` 并 `orderFrontRegardless` 强制置顶。
+//! - **Windows**：窗口已可见但被其它程序盖住时，通过托盘重新唤回需要主动调
+//!   `SetForegroundWindow` 把窗口拉到前台（winit/eframe 的 wakeup 转发是异步的，
+//!   错过了用户手势的 foreground 权限窗口，不主动调就只闪任务栏）。
+//! - **其它平台**：no-op stub，调用方无需写 `#[cfg]` 分支。
 
 #[cfg(target_os = "macos")]
 mod imp {
@@ -96,10 +93,126 @@ mod imp {
             }
         }
     }
+
+    /// wakeup 线程调用：macOS 的 NSApplication/NSWindow API 必须在主线程调用，
+    /// wakeup 线程不是主线程，所以这里 no-op。macOS 的唤回完全由主线程的
+    /// `bring_to_front` + `activate_countdown` 机制处理。
+    pub fn set_foreground() {}
 }
 
-/// 非 macOS 平台：提供同名空实现，调用方无需写 `#[cfg]` 分支。
-#[cfg(not(target_os = "macos"))]
+/// Windows：把本进程的可见顶层窗口拉到前台。
+///
+/// 用户切到别的程序后通过托盘重新唤回窗口时，Windows 不会自动把已有窗口提到前台
+/// （eframe 的 wakeup 转发是异步的，错过了用户手势赋予的 foreground 权限窗口），
+/// 需要主动 `SetForegroundWindow`。但 Windows 的前台锁定机制会让后台进程的
+/// `SetForegroundWindow` 只闪任务栏、不真正置顶——用 `AttachThreadInput` 把当前
+/// 线程的输入队列临时与前台线程 attach 在一起，骗过这个限制。
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+mod imp {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::System::Threading::{
+        AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindowThreadProcessId,
+        SetForegroundWindow,
+    };
+
+    pub fn set_accessory(_accessory: bool) {}
+    pub fn is_miniaturized() -> bool {
+        false
+    }
+    pub fn is_app_active() -> bool {
+        true
+    }
+
+    /// 从 wakeup 转发线程调用：用户刚点了托盘，此刻仍在系统赋予的 foreground 权限
+    /// 窗口内，直接 `SetForegroundWindow` 即可，不需要 `AttachThreadInput`（后者
+    /// 只对调用线程本身的输入队列生效，wakeup 线程不是窗口所属线程，用了也不对）。
+    /// 若窗口当前是隐藏的（`Visible(false)`），`SetForegroundWindow` 会失败——
+    /// 没关系，UI 线程的 `bring_to_front` 兜底会处理。
+    pub fn set_foreground() {
+        unsafe {
+            let pid = GetCurrentProcessId();
+            let _ = EnumWindows(Some(foreground_proc), LPARAM(pid as isize));
+        }
+    }
+
+    /// 从 UI 线程（`logic`）调用：作为 `set_foreground` 的兜底。窗口已由
+    /// `Visible(true)` 显示但可能仍不在前台时，用 `AttachThreadInput` 绕过
+    /// 前台锁定把窗口拉到最前。
+    pub fn bring_to_front() {
+        unsafe {
+            let pid = GetCurrentProcessId();
+            let _ = EnumWindows(Some(raise_proc), LPARAM(pid as isize));
+        }
+    }
+
+    /// `set_foreground` 的枚举回调：找到本进程第一个顶层窗口就调
+    /// `SetForegroundWindow` 并停止枚举。不做 `IsWindowVisible` 检查——
+    /// 窗口可能刚被 `Visible(true)` 还未真正可见，`SetForegroundWindow`
+    /// 对不可见窗口只是 no-op（返回 false），无害。
+    unsafe extern "system" fn foreground_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        unsafe {
+            let target_pid = lparam.0 as u32;
+            let mut window_pid: u32 = 0;
+            let _tid = GetWindowThreadProcessId(hwnd, Some(&mut window_pid));
+            if window_pid != target_pid {
+                return BOOL(1); // 不是本进程的窗口 → 继续枚举
+            }
+            let _ = SetForegroundWindow(hwnd);
+            BOOL(0) // 已找到 → 停止枚举
+        }
+    }
+
+    /// `bring_to_front` 的枚举回调：找到本进程第一个顶层窗口就 `raise_window` 并停止。
+    unsafe extern "system" fn raise_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        unsafe {
+            let target_pid = lparam.0 as u32;
+            let mut window_pid: u32 = 0;
+            let _tid = GetWindowThreadProcessId(hwnd, Some(&mut window_pid));
+            if window_pid != target_pid {
+                return BOOL(1); // 不是本进程的窗口 → 继续枚举
+            }
+            raise_window(hwnd);
+            BOOL(0) // 已找到 → 停止枚举
+        }
+    }
+
+    /// 单个窗口的置顶逻辑：AttachThreadInput → BringWindowToTop → SetForegroundWindow。
+    /// 不调 `ShowWindow(SW_RESTORE)`——窗口可见性由 winit/egui 管理（`Visible(true)`），
+    /// 自行 `ShowWindow` 会让 winit 的窗口状态缓存失真。
+    unsafe fn raise_window(hwnd: HWND) {
+        unsafe {
+            let foreground = GetForegroundWindow();
+            if foreground == hwnd {
+                return; // 已是前台窗口
+            }
+            // AttachThreadInput 把当前线程的输入队列临时与前台线程的 attach 在一起，
+            // 绕过"只有前台进程才能 SetForegroundWindow"的限制。
+            let fg_tid = if foreground.is_invalid() {
+                0
+            } else {
+                GetWindowThreadProcessId(foreground, None)
+            };
+            let our_tid = GetCurrentThreadId();
+            let attached = fg_tid != 0 && fg_tid != our_tid;
+            if attached {
+                let _ = AttachThreadInput(our_tid, fg_tid, true);
+            }
+            let _ = BringWindowToTop(hwnd);
+            let _ = SetForegroundWindow(hwnd);
+            if attached {
+                let _ = AttachThreadInput(our_tid, fg_tid, false);
+            }
+        }
+    }
+}
+
+/// 其它平台（Linux 等）：no-op stub，调用方无需写 `#[cfg]` 分支。
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 #[allow(dead_code)]
 mod imp {
     pub fn set_accessory(_accessory: bool) {}
@@ -109,7 +222,9 @@ mod imp {
     pub fn is_app_active() -> bool {
         true
     }
+    pub fn set_foreground() {}
     pub fn bring_to_front() {}
 }
 
+#[allow(unused_imports)]
 pub use imp::*;

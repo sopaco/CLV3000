@@ -14,7 +14,10 @@ use crate::clamav_info::ClamAvInfo;
 use crate::icon_data;
 use crate::theme::colors;
 use crate::widgets;
-use egui::{Align2, CursorIcon, Frame, Key, Rect, Sense, Stroke, TextureHandle, Vec2, pos2};
+use egui::{Align2, Frame, Key, TextureHandle, Vec2};
+// 以下导入仅 macOS 自绘标题栏使用（Windows 用系统标题栏，不编译相关代码）。
+#[cfg(not(windows))]
+use egui::{CursorIcon, Rect, Sense, Stroke, pos2};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const LOGO_TEX_ID: &str = "clv3000_about_logo";
@@ -139,16 +142,18 @@ fn ok_button(ui: &mut egui::Ui) -> egui::Response {
 }
 
 /// 关于独占窗口的标题栏高度，与 `app.rs` 的 `TITLE_BAR_HEIGHT` 保持一致，
-/// 保证主窗口和关于窗的标题栏观感统一。
+/// 保证主窗口和关于窗的标题栏观感统一。仅在 macOS 自绘标题栏时使用。
+#[cfg(not(windows))]
 const ABOUT_TITLE_BAR_HEIGHT: f32 = 44.0;
 
 /// 由 `App::ui` 在「来自托盘的关于」（`about_open && about_standalone`）时调用：
 /// 把关于内容画成**独占整个窗口**的页面。macOS 下窗口是无边框的（见 `main.rs` 的
 /// `with_decorations(false)`），没有原生标题栏，所以这里自己画一条与主页风格一致的
-/// 标题栏（标题 + 可拖动 + 关闭按钮），否则关于窗顶部会"没有标题栏"。整窗铺深色主题底
-/// （`BG_APP`），中间居中放一张**固定宽度**的关于卡片。用户点关闭 / OK / 按 Esc 即视为
-/// 关闭，置 `ABOUT_CLOSED`，由 `App::logic` 关掉关于层、再由 `reconcile_lifecycle`
-/// 把视口重新藏回托盘（或恢复原主窗口尺寸）。
+/// 标题栏（标题 + 可拖动 + 关闭按钮），否则关于窗顶部会"没有标题栏"。Windows 下窗口
+/// 用系统标题栏（`with_decorations(true)`），不画自绘标题栏，由系统提供拖动/关闭。
+/// 整窗铺深色主题底（`BG_APP`），中间居中放一张**固定宽度**的关于卡片。用户点关闭 /
+/// OK / 按 Esc 即视为关闭，置 `ABOUT_CLOSED`，由 `App::logic` 关掉关于层、再由
+/// `reconcile_lifecycle` 把视口重新藏回托盘（或恢复原主窗口尺寸）。
 pub fn paint_about_fullscreen(ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     // 主题由 `App::new` 调一次 `theme::apply` 即可，不在每帧重复设置——每帧重设
@@ -158,52 +163,57 @@ pub fn paint_about_fullscreen(ui: &mut egui::Ui) {
     let logo = load_logo_texture(&ctx);
     let info = cached_info();
 
-    // 顶部自绘标题栏：标题文字在左，关闭按钮在右；除关闭按钮区域外整条可拖动窗口。
-    egui::Panel::top("about_title_bar")
-        .exact_size(ABOUT_TITLE_BAR_HEIGHT)
-        .resizable(false)
-        .show_separator_line(false)
-        .frame(egui::Frame::default().fill(colors::BG_TITLEBAR))
-        .show(ui, |ui| {
-            let full_rect = ui.max_rect();
-            let btn_size = 32.0;
-            let edge_margin = 8.0;
-            let close_rect = Rect::from_center_size(
-                pos2(
-                    full_rect.right() - edge_margin - btn_size / 2.0,
-                    full_rect.center().y,
-                ),
-                Vec2::splat(btn_size),
-            );
-            if about_title_close_button(ui, close_rect) {
-                ABOUT_CLOSED.store(true, Ordering::Relaxed);
-            }
-            ui.horizontal_centered(|ui| {
-                ui.add_space(14.0);
-                // 用英文标题：egui 默认字体（default_fonts）不含中文字形，
-                // 中文标题会渲染成豆腐块乱码；界面其余文案也全是英文，保持一致。
-                widgets::bold_label(ui, "About CLV3000", 15.0, colors::TEXT_PRIMARY);
-            });
-            // 标题栏（除右侧关闭按钮区域外）可拖动窗口：文字那块叠一个拖拽区。
-            // 注意用 `is_pointer_button_down_on`（按下的那一帧就发 StartDrag），
-            // 不要用 `drag_started`——后者要等指针移动越过拖拽阈值才触发，此时
-            // 系统的 mouseDown 事件早已过去，winit 在 macOS 上做窗口拖动依赖
-            // "当前事件还是那次按下"，晚了就拖不动（表现：标题栏拖不动）。
-            let drag_rect = Rect::from_min_max(
-                pos2(full_rect.left(), full_rect.top()),
-                pos2(close_rect.left() - 4.0, full_rect.bottom()),
-            );
-            if drag_rect.width() > 0.0 {
-                let drag_resp = ui.interact(
-                    drag_rect,
-                    ui.id().with("about_titlebar_drag"),
-                    Sense::drag(),
+    // 顶部自绘标题栏：仅 macOS 使用（无边框窗口需要自绘）。Windows 用系统标题栏，
+    // 不画这条 Panel，否则会与系统标题栏重复。标题文字在左，关闭按钮在右；除关闭
+    // 按钮区域外整条可拖动窗口。
+    #[cfg(not(windows))]
+    {
+        egui::Panel::top("about_title_bar")
+            .exact_size(ABOUT_TITLE_BAR_HEIGHT)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(egui::Frame::default().fill(colors::BG_TITLEBAR))
+            .show(ui, |ui| {
+                let full_rect = ui.max_rect();
+                let btn_size = 32.0;
+                let edge_margin = 8.0;
+                let close_rect = Rect::from_center_size(
+                    pos2(
+                        full_rect.right() - edge_margin - btn_size / 2.0,
+                        full_rect.center().y,
+                    ),
+                    Vec2::splat(btn_size),
                 );
-                if drag_resp.is_pointer_button_down_on() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                if about_title_close_button(ui, close_rect) {
+                    ABOUT_CLOSED.store(true, Ordering::Relaxed);
                 }
-            }
-        });
+                ui.horizontal_centered(|ui| {
+                    ui.add_space(14.0);
+                    // 用英文标题：egui 默认字体（default_fonts）不含中文字形，
+                    // 中文标题会渲染成豆腐块乱码；界面其余文案也全是英文，保持一致。
+                    widgets::bold_label(ui, "About CLV3000", 15.0, colors::TEXT_PRIMARY);
+                });
+                // 标题栏（除右侧关闭按钮区域外）可拖动窗口：文字那块叠一个拖拽区。
+                // 注意用 `is_pointer_button_down_on`（按下的那一帧就发 StartDrag），
+                // 不要用 `drag_started`——后者要等指针移动越过拖拽阈值才触发，此时
+                // 系统的 mouseDown 事件早已过去，winit 在 macOS 上做窗口拖动依赖
+                // "当前事件还是那次按下"，晚了就拖不动（表现：标题栏拖不动）。
+                let drag_rect = Rect::from_min_max(
+                    pos2(full_rect.left(), full_rect.top()),
+                    pos2(close_rect.left() - 4.0, full_rect.bottom()),
+                );
+                if drag_rect.width() > 0.0 {
+                    let drag_resp = ui.interact(
+                        drag_rect,
+                        ui.id().with("about_titlebar_drag"),
+                        Sense::drag(),
+                    );
+                    if drag_resp.is_pointer_button_down_on() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                }
+            });
+    }
 
     egui::CentralPanel::default()
         .frame(Frame::default().fill(colors::BG_APP))
@@ -237,6 +247,8 @@ pub fn paint_about_fullscreen(ui: &mut egui::Ui) {
 }
 
 /// 关于窗标题栏右侧的关闭按钮（红圈 ×），点击置 `ABOUT_CLOSED`。
+/// 仅 macOS 自绘标题栏使用；Windows 由系统标题栏提供关闭按钮。
+#[cfg(not(windows))]
 fn about_title_close_button(ui: &mut egui::Ui, rect: Rect) -> bool {
     let response = ui
         .interact(rect, ui.id().with("about_close"), Sense::click())
