@@ -94,61 +94,77 @@ mod real {
         // 缓存不可用不会阻断扫描：open 内部失败会退化为空缓存，insert 失败也会静默忽略。
         let mut cache = cache::ScanCache::open(&cache_path, &effective_db);
 
-        // 预筛：能命中有效缓存的文件直接判结果并跳过 ClamAV；其余交给 ClamAV 扫。
+        // 预筛：分类为「可直接判定」与「需 clamscan」两类。先静默收集、不立刻发
+        // FileScanned——若先把缓存/签名命中全发出去，进度会冲到 99%，UI 看起来像卡在
+        // 「最后一个文件」，实际 clamscan 还在加载病毒库或尚未开始扫剩余文件。
         let mut to_scan: Vec<PathBuf> = Vec::new();
         let mut hash_by_path: HashMap<String, String> = HashMap::new();
-        for p in &paths {
+        let mut immediate: Vec<(String, Option<String>)> = Vec::new();
+        let prefilter_total = paths.len();
+        for (i, p) in paths.iter().enumerate() {
+            if cancel.load(Ordering::SeqCst) {
+                finish_scan(start, scanned, &cancel, &tx, cache, None);
+                return;
+            }
             let too_big = std::fs::metadata(p)
                 .map(|m| m.len() > CACHE_SKIP_SIZE)
                 .unwrap_or(false);
             if too_big {
                 to_scan.push(p.clone());
-                continue;
-            }
-            match cache::file_hash(p) {
-                Some(hash) => {
-                    if let Some(res) = cache.lookup(&hash) {
-                        let infected = if res == "clean" { None } else { Some(res) };
-                        scanned += 1;
-                        let _ = tx.send(ScanEvent::FileScanned {
-                            path: p.display().to_string(),
-                            infected,
-                        });
-                        continue;
+            } else {
+                match cache::file_hash(p) {
+                    Some(hash) => {
+                        if let Some(res) = cache.lookup(&hash) {
+                            let infected = if res == "clean" { None } else { Some(res) };
+                            immediate.push((p.display().to_string(), infected));
+                        } else if authenticode::is_trusted_signed(p) {
+                            immediate.push((p.display().to_string(), None));
+                            cache.insert(&hash, "clean");
+                        } else {
+                            hash_by_path.insert(p.display().to_string(), hash);
+                            to_scan.push(p.clone());
+                        }
                     }
-                    // 基因缓存未命中：可信签名文件先跑签名预筛。签名有效的文件
-                    // 直接判干净并跳过 ClamAV（首扫就见效），同时把结果写回基因缓存，
-                    // 下次连签名校验都不用再跑。
-                    if authenticode::is_trusted_signed(p) {
-                        scanned += 1;
-                        let _ = tx.send(ScanEvent::FileScanned {
-                            path: p.display().to_string(),
-                            infected: None,
-                        });
-                        cache.insert(&hash, "clean");
-                        continue;
+                    None => {
+                        to_scan.push(p.clone());
                     }
-                    hash_by_path.insert(p.display().to_string(), hash);
-                    to_scan.push(p.clone());
-                }
-                None => {
-                    // 读不了（被锁/无权限），交给 ClamAV 自行处理。
-                    to_scan.push(p.clone());
                 }
             }
+            let _ = tx.send(ScanEvent::PrefilterProgress {
+                analyzed: i + 1,
+                total: prefilter_total,
+            });
+        }
+
+        // 小文件先扫、大文件后扫：收尾阶段每个文件耗时更短，减少「卡在最后几个」的体感。
+        to_scan.sort_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(u64::MAX));
+
+        let skipped = immediate.len();
+        let pending = to_scan.len();
+        let _ = tx.send(ScanEvent::PrefetchComplete { skipped, pending });
+
+        for (path, infected) in immediate {
+            scanned += 1;
+            let _ = tx.send(ScanEvent::FileScanned { path, infected });
+        }
+
+        // 全部命中缓存/签名：无需启动 clamscan（省掉加载病毒库的十几秒）。
+        if pending == 0 {
+            finish_scan(start, scanned, &cancel, &tx, cache, None);
+            return;
+        }
+
+        if cancel.load(Ordering::SeqCst) {
+            finish_scan(start, scanned, &cancel, &tx, cache, None);
+            return;
         }
 
         // ClamAV 1.5.x 不支持 `--file-list=-`（stdin），必须写入实际临时文件。
-        // 单实例应用 + is_running() 互斥保证同一时刻只有一个扫描在跑，用 PID 命名足够。
         let temp_path = std::env::temp_dir()
             .join(format!("clv3000_scanlist_{}.txt", std::process::id()));
         if let Err(e) = write_path_list(&temp_path, &to_scan) {
             let _ = tx.send(ScanEvent::Error(format!("Failed to write scan list: {e}")));
-            let _ = tx.send(ScanEvent::Finished {
-                scanned,
-                elapsed: start.elapsed(),
-                cancelled: cancel.load(Ordering::SeqCst),
-            });
+            finish_scan(start, scanned, &cancel, &tx, cache, None);
             return;
         }
 
@@ -157,13 +173,9 @@ mod real {
             .arg("-v")
             .arg("--stdout")
             .arg(format!("--file-list={}", temp_path.display()));
-        // 显式指定病毒库目录：解析到真实存在的库（内置/系统安装/用户级 ~/.clamav），
-        // 避免依赖 clamscan 的编译期默认目录（开发机上往往为空或 root 所有无权限）。
-        // 解析不到任何库目录时就不传该参数，让 clamscan 退回到自身默认目录（通常也会报错被正常拦截）。
         if let Some(db) = &resolved_db {
             cmd.arg(format!("--database={}", db.display()));
         }
-        // 速度优化相关的扫描开关（按平台微调 PE 解析）统一加在这里。
         apply_scan_flags(&mut cmd);
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
@@ -174,11 +186,7 @@ mod real {
             Err(e) => {
                 let _ = std::fs::remove_file(&temp_path);
                 let _ = tx.send(ScanEvent::Error(format!("Failed to start scan engine: {e}")));
-                let _ = tx.send(ScanEvent::Finished {
-                    scanned: 0,
-                    elapsed: start.elapsed(),
-                    cancelled: false,
-                });
+                finish_scan(start, scanned, &cancel, &tx, cache, None);
                 return;
             }
         };
@@ -189,18 +197,13 @@ mod real {
                 let _ = child.kill();
                 let _ = std::fs::remove_file(&temp_path);
                 let _ = tx.send(ScanEvent::Error("Failed to read scan engine stdout".to_string()));
-                let _ = tx.send(ScanEvent::Finished {
-                    scanned: 0,
-                    elapsed: start.elapsed(),
-                    cancelled: false,
-                });
+                finish_scan(start, scanned, &cancel, &tx, cache, None);
                 return;
             }
         };
         let stderr = child.stderr.take();
         let child = Arc::new(Mutex::new(child));
 
-        // 看门狗：一旦收到取消信号，直接把子进程杀掉，stdout 管道随之关闭，读取循环退出。
         let watchdog_cancel = cancel.clone();
         let watchdog_child = Arc::clone(&child);
         let watchdog_done = Arc::new(AtomicBool::new(false));
@@ -217,8 +220,6 @@ mod real {
             }
         });
 
-        // stderr 读取线程：收集 clamscan 的错误/警告输出，供出错时展示。
-        // 正常扫描时 stderr 为空；只有 spawn 失败、路径无法访问等才会写 stderr。
         let stderr_thread = std::thread::spawn(move || -> String {
             let Some(stderr) = stderr else { return String::new() };
             BufReader::new(stderr)
@@ -228,17 +229,20 @@ mod real {
                 .join("\n")
         });
 
-        // 读取线程（就用当前线程）：逐行解析 clamscan 的 stdout。
-        // 输出形如：
-        //   Scanning /path/to/file        ← -v 的进度提示，不含 ": "，会被 rsplit 过滤掉
-        //   /path/to/file: OK             ← 正常
-        //   /path/to/file: Win.Test.EICAR_HDB-1 FOUND  ← 感染
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
             let Ok(line) = line else { break };
+            if let Some(path) = line.strip_prefix("Scanning ") {
+                let path = path.trim();
+                if !path.is_empty() {
+                    let _ = tx.send(ScanEvent::ScanningFile {
+                        path: path.to_string(),
+                    });
+                }
+                continue;
+            }
             if let Some((path, status)) = rsplit_result_line(&line) {
                 let infected = parse_infected(status);
-                // 把这次结果写回基因缓存（按内容哈希），下次同文件直接命中。
                 if let Some(hash) = hash_by_path.get(path) {
                     let result = infected.clone().unwrap_or_else(|| "clean".to_string());
                     cache.insert(hash, &result);
@@ -260,19 +264,35 @@ mod real {
         }
 
         let _ = std::fs::remove_file(&temp_path);
-        cache.save();
+        finish_scan(start, scanned, &cancel, &tx, cache, Some(&stderr_output));
+    }
 
+    /// 先发 `Finished` 让 UI 立刻进入 Done，再在后台线程落盘基因缓存（避免 compact
+    /// 重写 .tsv 阻塞扫描线程、拖慢 Done 页出现）。
+    fn finish_scan(
+        start: Instant,
+        scanned: usize,
+        cancel: &CancelFlag,
+        tx: &Sender<ScanEvent>,
+        cache: cache::ScanCache,
+        stderr_output: Option<&str>,
+    ) {
         let cancelled = cancel.load(Ordering::SeqCst);
-
-        // 如果一个文件都没扫到且有 stderr 输出，把错误信息发给 UI。
-        if scanned == 0 && !stderr_output.is_empty() {
-            let _ = tx.send(ScanEvent::Error(stderr_output));
+        if scanned == 0 {
+            if let Some(stderr) = stderr_output {
+                if !stderr.is_empty() {
+                    let _ = tx.send(ScanEvent::Error(stderr.to_string()));
+                }
+            }
         }
-
         let _ = tx.send(ScanEvent::Finished {
             scanned,
             elapsed: start.elapsed(),
             cancelled,
+        });
+        std::thread::spawn(move || {
+            let mut cache = cache;
+            cache.save();
         });
     }
 
@@ -352,6 +372,11 @@ mod mock {
     pub fn run(paths: Vec<PathBuf>, tx: Sender<ScanEvent>, cancel: CancelFlag) {
         let start = Instant::now();
         let should_flag = RUN_COUNTER.fetch_add(1, Ordering::Relaxed).is_multiple_of(2);
+
+        let _ = tx.send(ScanEvent::PrefetchComplete {
+            skipped: 0,
+            pending: paths.len(),
+        });
 
         let mut scanned = 0usize;
         let mut flagged = false;

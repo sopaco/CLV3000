@@ -68,6 +68,18 @@ struct ScanPageState {
     /// 上一帧这个页面实际画出来的内容高度，给 `widgets::vertically_centered` 用来
     /// 算这一帧该留多少顶部空白。见该函数文档注释。
     content_height: f32,
+    /// 预筛后仍需 clamscan 的文件数；0 表示全部命中缓存/签名。
+    clamscan_pending: usize,
+    /// 预筛阶段尚未上报的 FileScanned 条数（区分缓存命中 vs clamscan 产出）。
+    prefetch_remaining: usize,
+    /// clamscan 已产出结果的文件数。
+    clamscan_done: usize,
+    /// clamscan `-v` 的 `Scanning <path>` 行：文件正在扫但尚未出结果。
+    engine_scanning_path: Option<String>,
+    /// 预筛（基因哈希 + 缓存/签名校验）是否已完成。
+    prefetch_done: bool,
+    /// 预筛阶段已分析的文件数（由 `PrefilterProgress` 更新）。
+    prefilter_analyzed: usize,
 }
 
 impl ScanPageState {
@@ -81,6 +93,12 @@ impl ScanPageState {
             last_error: None,
             started_at: None,
             content_height: 0.0,
+            clamscan_pending: 0,
+            prefetch_remaining: 0,
+            clamscan_done: 0,
+            engine_scanning_path: None,
+            prefetch_done: false,
+            prefilter_analyzed: 0,
         }
     }
 
@@ -98,6 +116,13 @@ impl ScanPageState {
         self.threats.clear();
         self.last_error = None;
         self.started_at = Some(Instant::now());
+        self.clamscan_pending = 0;
+        self.prefetch_remaining = 0;
+        self.clamscan_done = 0;
+        self.engine_scanning_path = None;
+        // 全盘扫描先 walk 磁盘，此时不算引擎预筛；闪电扫描枚举完即进入预筛。
+        self.prefetch_done = self.kind == ScanKind::Full;
+        self.prefilter_analyzed = 0;
         let cancel = scan::new_cancel_flag();
         let (tx, rx) = std::sync::mpsc::channel();
         self.cancel = Some(cancel.clone());
@@ -132,20 +157,19 @@ impl ScanPageState {
 
     /// 返回 `Some((scanned, elapsed, cancelled))` 当这一批事件里出现了 `Finished`。
     ///
-    /// 每帧最多处理 `MAX_EVENTS_PER_FRAME` 个事件：clamscan 的 stdout 在管道上是块缓冲的，
-    /// 整个扫描过程的结果常常在进程退出时一次性 flush 进 channel。如果一帧全排空，
-    /// phase 会从 `Scanning(0)` 直接跳到 `Done`，UI 永远画不到中间的计数爬升过程。
-    /// 限流后突发的事件被分摊到连续几帧渲染，用户能肉眼看到 "1/109 → 2/109 → …"。
-    /// `Finished` 也会因此晚几帧到达（最多 `count / MAX_EVENTS_PER_FRAME` 帧），可忽略。
+    /// 每一帧把 channel 里**所有**事件都排空并处理：clamscan 的 stdout 在管道上是块
+    /// 缓冲的，整个扫描的结果常常在进程退出时一次性 flush 进 channel。早期版本用
+    /// `MAX_EVENTS_PER_FRAME` 把每帧处理的事件数限死（比如 4 个），上千个结果就被
+    /// 分摊到几百帧才排完，`Finished` 也跟着晚好几秒到达——进度环明明已扫完却还卡在
+    /// 很低的数、Done 页迟迟不出现，这就是"扫描页尾部滞后"。
+    ///
+    /// 现在每帧全排空：正常流式扫描时每帧本来只有 1~2 个事件，进度环照常逐帧爬升；
+    /// 只有进程退出那次突发 flush 会在一帧内把剩余结果全处理完，进度直接跳到 100%
+    /// 并立刻进入 Done——这正是我们想要的行为，滞后消失。
     fn poll(&mut self, config: &AppConfig) -> Option<(usize, Duration, bool)> {
-        const MAX_EVENTS_PER_FRAME: usize = 4;
         let mut finished = None;
-        let mut processed = 0usize;
         let Some(rx) = &self.rx else { return None };
-        while processed < MAX_EVENTS_PER_FRAME
-            && let Ok(event) = rx.try_recv()
-        {
-            processed += 1;
+        while let Ok(event) = rx.try_recv() {
             match event {
                 ScanEvent::Enumerating {
                     processes_done,
@@ -159,13 +183,47 @@ impl ScanPageState {
                     };
                 }
                 ScanEvent::ScanStarted { total } => {
+                    self.clamscan_pending = 0;
+                    self.prefetch_remaining = 0;
+                    self.clamscan_done = 0;
+                    self.engine_scanning_path = None;
+                    self.prefetch_done = false;
+                    self.prefilter_analyzed = 0;
                     self.phase = ScanPhase::Scanning {
                         total,
                         scanned: 0,
                         current_path: String::new(),
                     };
                 }
+                ScanEvent::PrefilterProgress { analyzed, total } => {
+                    self.prefetch_done = false;
+                    self.prefilter_analyzed = analyzed;
+                    if let ScanPhase::Scanning { total: phase_total, .. } = &mut self.phase {
+                        if phase_total.is_none() {
+                            *phase_total = Some(total);
+                        }
+                    }
+                }
+                ScanEvent::PrefetchComplete { skipped, pending } => {
+                    self.prefetch_done = true;
+                    self.clamscan_pending = pending;
+                    self.prefetch_remaining = skipped;
+                    self.clamscan_done = 0;
+                    self.engine_scanning_path = None;
+                }
+                ScanEvent::ScanningFile { path } => {
+                    self.engine_scanning_path = Some(path.clone());
+                    if let ScanPhase::Scanning { current_path, .. } = &mut self.phase {
+                        *current_path = path;
+                    }
+                }
                 ScanEvent::FileScanned { path, infected } => {
+                    if self.prefetch_remaining > 0 {
+                        self.prefetch_remaining -= 1;
+                    } else {
+                        self.clamscan_done += 1;
+                        self.engine_scanning_path = None;
+                    }
                     let total_hint = match &self.phase {
                         ScanPhase::Enumerating { files_found, .. } => Some(*files_found),
                         ScanPhase::Scanning { total, .. } => *total,
@@ -1515,28 +1573,52 @@ fn scan_page(
                 scanned,
                 current_path,
             } => {
-                // clamscan 启动后先加载病毒库（十几秒），这段时间 current_path 是空的、
-                // 一个 FileScanned 都没来。全盘扫描在 walk 磁盘阶段也是空 current_path。
-                // 用旋转不定进度环 + "Preparing scan…" 区分"准备中"和"正在逐文件扫描"；
-                // 两种状态都显示实时已用时长，让用户知道进度在走、不是卡死。
-                let starting = current_path.is_empty();
-                let percent = if starting {
+                let prefiltering = !state.prefetch_done;
+                let disk_walking = prefiltering
+                    && total.is_none()
+                    && *scanned == 0
+                    && current_path.is_empty()
+                    && state.clamscan_pending == 0
+                    && state.prefilter_analyzed == 0;
+                let engine_loading = state.prefetch_done
+                    && state.clamscan_pending > 0
+                    && state.clamscan_done == 0
+                    && state.engine_scanning_path.is_none();
+
+                let percent = if prefiltering && !disk_walking {
+                    total.map(|t| {
+                        if t == 0 {
+                            0.0
+                        } else {
+                            state.prefilter_analyzed as f32 / t as f32
+                        }
+                    })
+                } else if engine_loading || disk_walking {
                     None
                 } else {
                     total.map(|t| if t == 0 { 1.0 } else { *scanned as f32 / t as f32 })
                 };
-                let title_text = if starting {
+
+                let title_text = if prefiltering && !disk_walking {
+                    percent
+                        .map(|p| format!("{:.0}%", p * 100.0))
+                        .unwrap_or_else(|| state.prefilter_analyzed.to_string())
+                } else if engine_loading || disk_walking {
                     "Starting".to_string()
                 } else {
                     percent
                         .map(|p| format!("{:.0}%", p * 100.0))
                         .unwrap_or_else(|| format!("{scanned}"))
                 };
-                let heading = if starting {
+
+                let heading = if prefiltering && !disk_walking {
+                    format!("Analyzing {title}")
+                } else if engine_loading || disk_walking {
                     format!("Starting {title}")
                 } else {
                     format!("Running {title}")
                 };
+
                 widgets::bold_label(ui, &heading, 14.0, colors::TEXT_PRIMARY);
                 ui.add_space(6.0);
                 widgets::progress_ring(
@@ -1545,10 +1627,14 @@ fn scan_page(
                     percent,
                     ring_color,
                     &title_text,
-                    if starting { "scan engine" } else { "" },
+                    if engine_loading || disk_walking { "scan engine" } else { "" },
                 );
                 ui.add_space(4.0);
-                let status_line = if starting {
+                let status_line = if let Some(p) = &state.engine_scanning_path {
+                    truncate(p, 60)
+                } else if prefiltering && !disk_walking {
+                    "Analyzing files…".to_string()
+                } else if engine_loading || disk_walking {
                     "Preparing scan…".to_string()
                 } else {
                     truncate(current_path, 60)
@@ -1567,9 +1653,16 @@ fn scan_page(
                     );
                 }
                 ui.add_space(16.0);
-                let first_pill = match total {
-                    Some(t) => (format!("{scanned} / {t}"), "files"),
-                    None => (scanned.to_string(), "scanned"),
+                let first_pill = if prefiltering && !disk_walking {
+                    match total {
+                        Some(t) => (format!("{} / {t}", state.prefilter_analyzed), "analyzed"),
+                        None => (state.prefilter_analyzed.to_string(), "analyzed"),
+                    }
+                } else {
+                    match total {
+                        Some(t) => (format!("{scanned} / {t}"), "files"),
+                        None => (scanned.to_string(), "scanned"),
+                    }
                 };
                 widgets::centered_stat_pills(
                     ui,

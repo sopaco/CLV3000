@@ -1,9 +1,8 @@
 //! 资源监控：独立后台线程，每秒采集一次 CPU/内存占用，通过 channel 发给 UI。
 //! 只做采集和展示，不做任何告警逻辑。
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use sysinfo::System;
 
@@ -26,12 +25,16 @@ impl ResourceSample {
 
 pub struct SysMonHandle {
     pub rx: Receiver<ResourceSample>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl Drop for SysMonHandle {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
+        // 置位停止标记并唤醒后台线程，让它立刻从 park_timeout 返回并退出，
+        // 不必空转等到下一次采样周期结束。
+        let (lock, cvar) = &*self.stop;
+        *lock.lock().unwrap() = true;
+        cvar.notify_one();
     }
 }
 
@@ -40,7 +43,7 @@ impl Drop for SysMonHandle {
 /// 刷新完全由数据驱动，UI 线程不需要为它为维持任何定时重绘心跳。
 pub fn spawn(ctx: egui::Context) -> SysMonHandle {
     let (tx, rx): (Sender<ResourceSample>, Receiver<ResourceSample>) = std::sync::mpsc::channel();
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new((Mutex::new(false), Condvar::new()));
     let stop_flag = Arc::clone(&stop);
 
     std::thread::spawn(move || {
@@ -57,7 +60,25 @@ pub fn spawn(ctx: egui::Context) -> SysMonHandle {
         let mut smoothed_cpu: Option<f32> = None;
         let mut smoothed_mem: Option<f64> = None;
 
-        while !stop_flag.load(Ordering::SeqCst) {
+        loop {
+            // 等待停止标记或 1 秒到期——用条件变量 + park_timeout 替代原先的
+            // 10×100ms 自旋轮询：平时线程真正睡死、零 CPU；关闭时由 Drop 的
+            // notify_one 立刻唤醒，几乎无延迟退出。
+            {
+                let (lock, cvar) = &*stop_flag;
+                let guard = lock.lock().unwrap();
+                if *guard {
+                    break;
+                }
+                let (guard, _timeout) = cvar
+                    .wait_timeout(guard, Duration::from_millis(1_000))
+                    .unwrap();
+                if *guard {
+                    break;
+                }
+                drop(guard);
+            }
+
             sys.refresh_cpu_usage();
             sys.refresh_memory();
 
@@ -85,13 +106,6 @@ pub fn spawn(ctx: egui::Context) -> SysMonHandle {
             }
             // 唤醒 UI 消费这份采样并刷新资源条（约 1Hz）。
             ctx.request_repaint();
-            // 用短睡眠间隔轮询停止标记，这样关闭程序时不用等一整秒。
-            for _ in 0..10 {
-                if stop_flag.load(Ordering::SeqCst) {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
         }
     });
 
