@@ -1330,11 +1330,11 @@ fn dashboard_page(ui: &mut egui::Ui, _ctx: &egui::Context, app: &mut App) {
         widgets::paint_glow(&painter, center, radius, color);
         painter.circle_filled(center, radius, colors::BG_CARD);
         painter.circle_stroke(center, radius, Stroke::new(3.0, color));
-        let glyph_rect = egui::Rect::from_center_size(center, Vec2::splat(DIAMETER * 0.50));
+        let glyph_rect = egui::Rect::from_center_size(center, Vec2::splat(DIAMETER * 0.46));
         if has_threats {
-            icons::warning_triangle(&painter, glyph_rect, Stroke::new(2.4, color), None);
+            icons::status_glyph_at_risk(&painter, glyph_rect, color);
         } else {
-            icons::shield_check(&painter, glyph_rect, Stroke::new(2.4, color));
+            icons::status_glyph_secure(&painter, glyph_rect, color);
         }
 
         ui.add_space(20.0);
@@ -1790,11 +1790,11 @@ fn scan_page(
                 widgets::paint_glow(&painter, center, radius, color);
                 painter.circle_filled(center, radius, colors::BG_CARD);
                 painter.circle_stroke(center, radius, Stroke::new(3.0, color));
-                let glyph_rect = egui::Rect::from_center_size(center, Vec2::splat(DIAMETER * 0.50));
+                let glyph_rect = egui::Rect::from_center_size(center, Vec2::splat(DIAMETER * 0.46));
                 if has_threats {
-                    icons::warning_triangle(&painter, glyph_rect, Stroke::new(2.2, color), None);
+                    icons::status_glyph_at_risk(&painter, glyph_rect, color);
                 } else {
-                    icons::shield_check(&painter, glyph_rect, Stroke::new(2.2, color));
+                    icons::status_glyph_secure(&painter, glyph_rect, color);
                 }
                 ui.add_space(14.0);
                 let heading = if *cancelled {

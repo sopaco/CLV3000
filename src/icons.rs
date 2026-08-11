@@ -70,14 +70,36 @@ pub fn shield(painter: &Painter, rect: Rect, stroke: Stroke, fill: Option<Color3
     painter.add(Shape::line(pts, PathStroke::from(stroke)));
 }
 
-/// 盾牌 + 中间一个勾选标记，仪表盘"安全"状态用。
-pub fn shield_check(painter: &Painter, rect: Rect, stroke: Stroke) {
-    shield(painter, rect, stroke, None);
-    let check: Vec<Pos2> = [(0.32, 0.52), (0.46, 0.68), (0.72, 0.34)]
+fn path_stroke(stroke: Stroke) -> PathStroke {
+    PathStroke::new(stroke.width, stroke.color)
+}
+
+/// 大圆环内的"安全"状态图形：半透明填充 + 高对比勾选，避免纯线框在大尺寸下显得空/单薄。
+pub fn status_glyph_secure(painter: &Painter, rect: Rect, color: Color32) {
+    const SHIELD_SCALE: f32 = 1.25;
+    let shield_rect = Rect::from_center_size(rect.center(), rect.size() * SHIELD_SCALE);
+
+    let body_fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 38);
+    let outline = Stroke::new(2.2, color);
+    shield(painter, shield_rect, outline, Some(body_fill));
+    let check: Vec<Pos2> = [(0.30, 0.50), (0.44, 0.66), (0.74, 0.32)]
         .iter()
         .map(|&(u, v)| map(rect, u, v))
         .collect();
-    painter.add(polyline(&check, stroke, false));
+    let mark = Stroke::new(3.0, Color32::from_rgb(245, 247, 250));
+    painter.add(Shape::line(check, path_stroke(mark)));
+}
+
+/// 大圆环内的"风险"状态图形，风格与 [`status_glyph_secure`] 对称。
+pub fn status_glyph_at_risk(painter: &Painter, rect: Rect, color: Color32) {
+    let body_fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 38);
+    let outline = Stroke::new(2.2, color);
+    warning_triangle(painter, rect, outline, Some(body_fill));
+    let mark = Stroke::new(2.8, Color32::from_rgb(245, 247, 250));
+    let top = map(rect, 0.50, 0.36);
+    let bottom = map(rect, 0.50, 0.60);
+    painter.line_segment([top, bottom], mark);
+    painter.circle_filled(map(rect, 0.50, 0.74), mark.width * 0.55, mark.color);
 }
 
 /// 警告三角形 + 感叹号，发现威胁状态用。
