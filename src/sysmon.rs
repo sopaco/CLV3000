@@ -36,7 +36,9 @@ impl Drop for SysMonHandle {
 }
 
 /// 启动资源监控后台线程，返回一个可以轮询最新采样值的 handle。
-pub fn spawn() -> SysMonHandle {
+/// `ctx` 用于每产出一份采样就 `request_repaint` 唤醒 UI——这样底部资源条按 1Hz
+/// 刷新完全由数据驱动，UI 线程不需要为它为维持任何定时重绘心跳。
+pub fn spawn(ctx: egui::Context) -> SysMonHandle {
     let (tx, rx): (Sender<ResourceSample>, Receiver<ResourceSample>) = std::sync::mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::clone(&stop);
@@ -81,6 +83,8 @@ pub fn spawn() -> SysMonHandle {
             if tx.send(sample).is_err() {
                 break;
             }
+            // 唤醒 UI 消费这份采样并刷新资源条（约 1Hz）。
+            ctx.request_repaint();
             // 用短睡眠间隔轮询停止标记，这样关闭程序时不用等一整秒。
             for _ in 0..10 {
                 if stop_flag.load(Ordering::SeqCst) {

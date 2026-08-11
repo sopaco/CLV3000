@@ -154,7 +154,9 @@ pub fn progress_ring(
                 std::f32::consts::PI * 0.6,
                 ring_color,
             );
-            ui.ctx().request_repaint();
+            // 旋转动画需要持续重绘；限制在 ~30fps，兼顾流畅与老机器的 CPU 开销。
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(33));
         }
     }
 

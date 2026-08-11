@@ -24,8 +24,12 @@ blake3 = "1"   # 文件基因缓存：内容哈希，纯 Rust、跨平台、比 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_Security", "Win32_Security_WinTrust", "Win32_Security_Cryptography", "Win32_System_SystemInformation"] }
 
+# macOS 专属：检测 Dock 图标点击 / Cmd+Tab 切回本 App，用于唤回被隐藏到托盘的主窗口
+# （winit 0.30 故意不处理 macOS 的 dock 重新打开事件，见 src/macos_reopen.rs）。
+# 版本号与依赖图里已锁定的 objc2 完全一致，不会触发重新解析或联网下载。
 [target.'cfg(target_os = "macos")'.dependencies]
-core-foundation = "0.9.4"
+objc2 = "0.6.4"
+objc2-app-kit = "0.3.2"
 
 # 给 exe 嵌图标资源用的（见 build.rs）。
 #

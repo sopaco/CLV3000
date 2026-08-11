@@ -12,7 +12,6 @@ use crate::tray::Tray;
 use crate::widgets::{self, ThreatAction, Toast};
 use eframe::egui;
 use egui::{Color32, Stroke, Vec2, ViewportCommand};
-use muda::MenuEvent;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -20,6 +19,12 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 use tray_icon::TrayIconEvent;
+
+/// 主窗口默认尺寸（与 `main.rs` 里 `with_inner_size` 一致）。
+const MAIN_WINDOW_SIZE: [f32; 2] = [900.0, 600.0];
+/// 「关于」独占窗口尺寸：比主窗口小一圈，避免关于页背后留一大片黑底（见
+/// `about_dialog::paint_about_fullscreen`）。注意要 ≥ `main.rs` 里的 `min_inner_size`。
+const ABOUT_WINDOW_SIZE: [f32; 2] = [480.0, 460.0];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Page {
@@ -246,7 +251,8 @@ impl VirusDbState {
     /// 异步重新查询病毒库版本：后台线程跑 `clamscan -V`，结果经 `version_rx` 回传，
     /// 不在 UI 线程阻塞（之前是同步调 `database_version()`，会卡住一帧）。
     /// 已有查询在飞（`version_rx` 挂着）就跳过，避免重复发起。
-    fn refresh_db_version(&mut self) {
+    /// `ctx` 用于查询完成时唤醒 UI（闲置时 UI 没有定时心跳，不唤醒结果就一直没人收）。
+    fn refresh_db_version(&mut self, ctx: egui::Context) {
         if self.version_rx.is_some() {
             return; // 已有查询在飞，不重复发起
         }
@@ -255,10 +261,11 @@ impl VirusDbState {
         std::thread::spawn(move || {
             let v = ClamAvInfo::database_version();
             let _ = tx.send(v);
+            ctx.request_repaint();
         });
     }
 
-    fn start_update(&mut self) {
+    fn start_update(&mut self, ctx: egui::Context) {
         if self.updating || !paths::freshclam_available() {
             return;
         }
@@ -266,8 +273,23 @@ impl VirusDbState {
         self.rx = Some(rx);
         self.updating = true;
         std::thread::spawn(move || {
-            let result = run_freshclam();
+            // 后台线程里跑 freshclam；万一它 panic，用 catch_unwind 兜住，
+            // 把 panic 信息作为错误带回主线程，而不是只报一个含糊的
+            // "Update thread stopped unexpectedly"（通道断开）。
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_freshclam))
+                .unwrap_or_else(|payload| {
+                    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic payload".to_string()
+                    };
+                    Err(format!("Update thread panicked: {msg}"))
+                });
             let _ = tx.send(result);
+            // 唤醒 UI 立刻消费更新结果（弹 Toast / 刷新版本号），不等任何心跳。
+            ctx.request_repaint();
         });
     }
 
@@ -392,31 +414,54 @@ fn run_freshclam() -> Result<UpdateOutcome, String> {
     let before = database_signature(&db_dir);
 
     let mut cmd = Command::new(paths::freshclam_path());
+    // macOS 上没有系统默认 freshclam.conf，必须显式指定，否则 freshclam 直接报
+    // "Can't open/parse the config file" 退出。config 里已含 DatabaseDirectory，
+    // 这里再补一个 --datadir（与 config 一致）兜底，确保写到 resolved 目录。
+    if let Some(cfg) = paths::freshclam_config_path() {
+        cmd.arg("--config-file").arg(cfg);
+    }
     cmd.arg(format!("--datadir={}", db_dir.display()))
-        .stdout(Stdio::null())
-        // 保留 stderr 管道：freshclam 的报错（配置文件缺失、连不上镜像源等）都走
-        // stderr，失败时把它塞进错误提示，比只报退出码有用得多。
+        // 保留 stdout / stderr 管道：freshclam 的更新进度走 stdout，报错（配置文件缺失、
+        // 连不上镜像源等）走 stderr。失败时把它们写进调试日志，比只报退出码有用得多。
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    match cmd.output() {
-        Ok(out) if out.status.success() => {
-            let after = database_signature(&db_dir);
-            if after != before {
-                Ok(UpdateOutcome::Updated)
-            } else {
-                Ok(UpdateOutcome::AlreadyUpToDate)
-            }
-        }
+    let mut spawned_args: Vec<String> = vec![paths::freshclam_path().display().to_string()];
+    if let Some(cfg) = paths::freshclam_config_path() {
+        spawned_args.push("--config-file".to_string());
+        spawned_args.push(cfg.display().to_string());
+    }
+    spawned_args.push(format!("--datadir={}", db_dir.display()));
+
+    // 先算出结果，再统一写调试日志（含 stdout/stderr/退出码），最后返回。
+    // stderr_log 在 match 的两个分支里都会被赋值，故用延迟初始化声明。
+    let mut stdout_log = String::new();
+    let stderr_log: String;
+    let result = match cmd.output() {
         Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            if stderr.is_empty() {
+            stdout_log = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            stderr_log = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            if out.status.success() {
+                let after = database_signature(&db_dir);
+                if after != before {
+                    Ok(UpdateOutcome::Updated)
+                } else {
+                    Ok(UpdateOutcome::AlreadyUpToDate)
+                }
+            } else if stderr_log.is_empty() {
                 Err(format!("Database update failed with exit code {}", out.status))
             } else {
-                Err(format!("Database update failed (exit {}): {}", out.status, stderr))
+                Err(format!("Database update failed (exit {}): {}", out.status, stderr_log))
             }
         }
-        Err(e) => Err(format!("Failed to start freshclam: {e}")),
-    }
+        Err(e) => {
+            let msg = format!("Failed to start freshclam: {e}");
+            stderr_log = msg.clone();
+            Err(msg)
+        }
+    };
+    debug_log_freshclam(&spawned_args, &result, &stdout_log, &stderr_log);
+    result
 }
 
 /// 开发预览用（Linux 等）：不真的联网更新，睡一下模拟"正在更新"的等待感，然后报成功。
@@ -432,6 +477,25 @@ fn run_freshclam() -> Result<UpdateOutcome, String> {
     } else {
         Ok(UpdateOutcome::AlreadyUpToDate)
     }
+}
+
+/// macOS 调试用：把 freshclam 的命令行、退出码、stdout、stderr 追加写到
+/// `/tmp/clv3000_freshclam.log`，方便在 GUI 子进程里复现失败时拿到完整现场
+/// （GUI 跑的命令和终端里手敲的偶尔会因环境不同而出错，光看弹窗里的简短报错不够）。
+#[cfg(target_os = "macos")]
+fn debug_log_freshclam(args: &[String], result: &Result<UpdateOutcome, String>, stdout: &str, stderr: &str) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let line = format!(
+        "[{stamp}] args={args:?}\n  result={result:?}\n  stdout={stdout}\n  stderr={stderr}\n"
+    );
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/clv3000_freshclam.log")
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
 }
 
 /// 跨「窗口会话」保留的业务状态（配置、扫描、页面路由）。纯托盘模式下也存在。
@@ -457,7 +521,8 @@ impl AppCore {
     }
 
     /// 轮询扫描/病毒库后台线程；返回需要弹 Toast 的消息（仅窗口会话消费）。
-    pub fn poll_background(&mut self) -> Vec<String> {
+    /// `ctx` 透传给更新完成后的版本号刷新（后台线程完成时要能唤醒 UI）。
+    pub fn poll_background(&mut self, ctx: &egui::Context) -> Vec<String> {
         let mut toasts = Vec::new();
         if let Some((scanned, elapsed, cancelled)) = self.quick.poll(&self.config) {
             if !cancelled {
@@ -484,11 +549,11 @@ impl AppCore {
         if let Some(result) = self.virus_db.poll() {
             match result {
                 Ok(UpdateOutcome::Updated) => {
-                    self.virus_db.refresh_db_version();
+                    self.virus_db.refresh_db_version(ctx.clone());
                     toasts.push("Virus database updated".to_string());
                 }
                 Ok(UpdateOutcome::AlreadyUpToDate) => {
-                    self.virus_db.refresh_db_version();
+                    self.virus_db.refresh_db_version(ctx.clone());
                     toasts.push("Virus database already up to date".to_string());
                 }
                 Err(e) => toasts.push(format!("Database update failed: {e}")),
@@ -499,24 +564,36 @@ impl AppCore {
 }
 
 /// 托盘/菜单事件：窗口与纯托盘循环共用。
+/// 事件来自 `wakeup` 模块的转发队列——转发线程阻塞在 tray-icon/muda 的全局
+/// channel 上，事件到达时已经替我们 `request_repaint` 唤醒了 UI，这里只管排空。
 pub fn poll_tray_events(tray: &Tray, core: &mut AppCore, lifecycle: &mut Lifecycle) {
-    while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+    // 锁只在这一小段排空循环里持有，发送端（wakeup 转发线程）基本碰不到竞争。
+    while let Ok(event) = crate::wakeup::tray_events().lock().unwrap().try_recv() {
         if let TrayIconEvent::DoubleClick { .. } = event {
+            // 双击托盘：显示主窗口（同时清掉可能打开的关于层）。
             lifecycle.mode = RunMode::ShowWindow;
+            lifecycle.about_open = false;
+            lifecycle.about_standalone = false;
         }
     }
 
-    while let Ok(event) = MenuEvent::receiver().try_recv() {
+    while let Ok(event) = crate::wakeup::menu_events().lock().unwrap().try_recv() {
         let id = event.id();
         if id == &tray.ids.show {
+            // 显示主窗口：清掉关于层，否则关于独占窗口会挡住主界面。
             lifecycle.mode = RunMode::ShowWindow;
+            lifecycle.about_open = false;
+            lifecycle.about_standalone = false;
         } else if id == &tray.ids.quick_scan {
             lifecycle.mode = RunMode::ShowWindow;
+            lifecycle.about_open = false;
+            lifecycle.about_standalone = false;
             core.page = Page::QuickScan;
             core.quick.start(core.config.scan_removable_drives);
         } else if id == &tray.ids.about {
-            lifecycle.resume_after_about = Some(lifecycle.mode);
-            lifecycle.mode = RunMode::AboutOnly;
+            // 来自托盘的关于：只占整个窗口画关于页，不画主界面（about_standalone）。
+            lifecycle.about_open = true;
+            lifecycle.about_standalone = true;
         } else if id == &tray.ids.quit {
             lifecycle.mode = RunMode::Quit;
         }
@@ -539,6 +616,17 @@ pub struct App {
     /// （Windows 用系统标题栏，不加载）。
     #[cfg(not(windows))]
     titlebar_icon_texture: Option<egui::TextureHandle>,
+    /// 主视口当前是否处于「隐藏到托盘」状态。eframe 会话全程存活（不再关闭重建），
+    /// 关闭窗口改成 `Visible(false)` 隐藏视口，靠这个标志位在 `logic` 里把生命周期
+    /// 模式（ShowWindow / TrayOnly）对齐到真实的视口可见性。
+    window_hidden: bool,
+    /// 从托盘唤回窗口后的「置顶倒计时」：macOS 14+ 下单次 `activate()` 抢不到焦点、
+    /// 窗口不会自动浮到最前，需要在接下来若干帧里反复 `orderFrontRegardless()` 才能稳
+    /// 定把窗口提到最前（见 `macos_reopen::bring_to_front`）。每帧递减，归零后停止。
+    activate_countdown: u8,
+    /// 当前窗口尺寸的「意图」：0 = 主窗口尺寸，1 = 关于独占窗口尺寸。只在意图变化
+    /// 时才发 `InnerSize` 指令，避免每帧重置、干扰用户对主窗口的手动缩放。
+    size_intent: u8,
 }
 
 /// 把 `icon_data::load_*_icon` 解出来的 `(rgba, w, h)` 传进 egui 的纹理系统，
@@ -560,8 +648,12 @@ impl App {
         tray_slot: Rc<RefCell<Option<Tray>>>,
     ) -> Self {
         theme::apply(&cc.egui_ctx);
+        // 注册当前会话的 egui Context，让 wakeup 转发线程 / sysmon 采样线程能在
+        // 有事件（托盘点击、菜单、资源采样）时主动唤醒 UI——替代旧的定时心跳。
+        crate::wakeup::register_ctx(&cc.egui_ctx);
 
         let tray = tray_slot.borrow_mut().take();
+        let window_hidden = lifecycle.borrow().mode == RunMode::TrayOnly;
 
         Self {
             core,
@@ -575,6 +667,9 @@ impl App {
             app_icon_texture: None,
             #[cfg(not(windows))]
             titlebar_icon_texture: None,
+            window_hidden,
+            activate_countdown: 0,
+            size_intent: 0,
         }
     }
 
@@ -592,7 +687,7 @@ impl App {
 
     fn ensure_ui_resources(&mut self, ctx: &egui::Context) {
         if self.sysmon.is_none() {
-            self.sysmon = Some(sysmon::spawn());
+            self.sysmon = Some(sysmon::spawn(ctx.clone()));
         }
         if self.app_icon_texture.is_none() {
             const LOGO_DISPLAY_PT: f32 = 90.0;
@@ -625,17 +720,21 @@ impl App {
     }
 
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
+        // 释放 GPU 纹理与资源监控，但**不关闭** eframe 会话——eframe 事件循环（以及
+        // 其背后的 AppKit / winit 消息泵）必须一直存活，托盘图标的菜单点击才能被
+        // 系统正常投递。真正"关闭窗口"改成把视口藏起来（`Visible(false)`），由
+        // `reconcile_lifecycle` 对账到真实的视口可见性（并在隐藏态把 App 的激活策略
+        // 切到 Accessory，从而离开 Dock——见 src/macos_reopen.rs）。
         self.release_ui_resources(ctx);
         self.lifecycle.borrow_mut().mode = RunMode::TrayOnly;
-        self.allow_exit = true;
-        ctx.send_viewport_cmd(ViewportCommand::Close);
     }
 
     fn poll_tray(&mut self, ctx: &egui::Context) {
         let Some(tray) = self.tray() else { return };
 
-        // 先在局部作用域里轮询托盘事件并取出下一模式，再 drop 所有 RefCell 借用。
-        // `send_viewport_cmd(Close)` 可能同步重入 `logic()`，若仍持有 `borrow_mut` 会 panic。
+        // 只在局部作用域里轮询托盘事件并取出下一模式，再 drop 所有 RefCell 借用——
+        // 真正的视口指令（显示/隐藏/退出）统一交给 `reconcile_lifecycle`，避免在此处
+        // 同步重入 `logic()` 导致仍持有 `borrow_mut` 时 panic。
         let next_mode = {
             let mut core = self.core.borrow_mut();
             let mut lifecycle = self.lifecycle.borrow_mut();
@@ -646,19 +745,71 @@ impl App {
         match next_mode {
             RunMode::Quit => {
                 self.allow_exit = true;
-                ctx.send_viewport_cmd(ViewportCommand::Close);
             }
-            RunMode::AboutOnly => {
-                self.release_ui_resources(ctx);
-                self.allow_exit = true;
-                ctx.send_viewport_cmd(ViewportCommand::Close);
+            _ => {
+                let _ = ctx;
             }
-            _ => {}
         }
     }
 
-    fn poll_background(&mut self) {
-        let toasts = self.core.borrow_mut().poll_background();
+    /// 把生命周期模式对齐到真实的视口可见性 + macOS 激活策略。eframe 会话全程存活，
+    /// 所以这里只发 `Visible` / 激活策略指令，绝不 `Close`（除非用户真的点了退出）。
+    ///
+    /// 可见条件：`ShowWindow` 模式，或「关于」打开（无论是覆盖在主窗上、还是独占窗口）。
+    /// 「关于」独占窗口时主视口必须可见——这正是来自托盘的关于会把窗口带出来的原因；
+    /// 关闭关于后若来源是托盘、`mode` 仍是 `TrayOnly`，下一帧这里就会把视口重新藏起来，
+    /// 不会残留主窗口。
+    ///
+    /// macOS 激活策略（见 src/macos_reopen.rs）：
+    /// - 有窗口时 → `Regular`：正常 App，带 Dock 图标与前台菜单；
+    /// - 隐藏到托盘时 → `Accessory`：菜单栏小工具模式，无 Dock 图标。这样托盘态下 App
+    ///   根本不在 Dock 上，用户想要"关闭窗口后只留托盘、不必再占 Dock"的需求直接满足，
+    ///   也彻底绕开了"winit 不处理 Dock 重新打开事件 → 点 Dock 唤不回窗口"的坑。
+    fn reconcile_lifecycle(&mut self, ctx: &egui::Context) {
+        let (mode, about_open, about_standalone) = {
+            let lc = self.lifecycle.borrow();
+            (lc.mode, lc.about_open, lc.about_standalone)
+        };
+        if mode == RunMode::Quit {
+            self.allow_exit = true;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+            return;
+        }
+        let desired_visible = mode == RunMode::ShowWindow || about_open;
+        if desired_visible {
+            // 有窗口：必须是 Regular（Dock 图标 + 前台菜单），并确保窗口可见。
+            #[cfg(target_os = "macos")]
+            crate::macos_reopen::set_accessory(false);
+            if self.window_hidden {
+                ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+                self.window_hidden = false;
+                // 从托盘（隐藏）唤回：接下来若干帧反复把窗口提到最前
+                // （Accessory→Regular 切换 + macOS 14 激活策略变化，单次 activate 不够）。
+                self.activate_countdown = 12;
+            }
+            // 关于独占窗口用较小的尺寸，主窗口用默认尺寸；只在「尺寸意图」变化时发
+            // 指令，避免每帧都重置、干扰用户对主窗口的手动缩放。
+            let intent = if about_open && about_standalone { 1 } else { 0 };
+            if intent != self.size_intent {
+                let size = if intent == 1 { ABOUT_WINDOW_SIZE } else { MAIN_WINDOW_SIZE };
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(size.into()));
+                self.size_intent = intent;
+            }
+        } else if !self.window_hidden {
+            // 进托盘态：先把视口藏起来，再切到 Accessory（离开 Dock）。
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+            self.window_hidden = true;
+            #[cfg(target_os = "macos")]
+            crate::macos_reopen::set_accessory(true);
+        } else {
+            // 已隐藏：确保每个隐藏周期都落到 Accessory（例如 `--tray-only` 启动即隐藏）。
+            #[cfg(target_os = "macos")]
+            crate::macos_reopen::set_accessory(true);
+        }
+    }
+
+    fn poll_background(&mut self, ctx: &egui::Context) {
+        let toasts = self.core.borrow_mut().poll_background(ctx);
         for msg in toasts {
             self.toast(msg);
         }
@@ -667,6 +818,7 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        crate::wakeup::unregister_ctx();
         if let Some(tray) = self.tray.take() {
             *self.tray_slot.borrow_mut() = Some(tray);
         }
@@ -675,8 +827,34 @@ impl Drop for App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        eprintln!(
+            "FRAME {}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ); // TEMP-INSTRUMENTATION
         self.poll_tray(ctx);
-        self.poll_background();
+        self.reconcile_lifecycle(ctx);
+
+        // 从托盘唤回后的几帧内，反复把窗口提到最前（见 macos_reopen::bring_to_front）。
+        // macOS 14+ 下单次 activate 抢不到焦点，必须连续几帧 orderFrontRegardless 才稳。
+        if self.activate_countdown > 0 {
+            #[cfg(target_os = "macos")]
+            crate::macos_reopen::bring_to_front();
+            self.activate_countdown -= 1;
+        }
+
+        self.poll_background(ctx);
+
+        // 「关于」关闭（OK / Esc / 窗口关闭按钮都会置位 ABOUT_CLOSED）：只关掉关于层，
+        // 主窗口的去留由生命周期模式决定——来自托盘（`TrayOnly`）时下一帧 reconcile
+        // 会自动把视口重新藏起来，不会残留主窗口。
+        if self.lifecycle.borrow().about_open && crate::about_dialog::take_closed() {
+            let mut lc = self.lifecycle.borrow_mut();
+            lc.about_open = false;
+            lc.about_standalone = false;
+        }
 
         if let Some(sysmon) = &self.sysmon
             && let Ok(sample) = sysmon.rx.try_recv()
@@ -684,22 +862,69 @@ impl eframe::App for App {
             self.last_sample = sample;
         }
 
+        // 重绘策略：尽量事件驱动，绝不让事件循环空转——这是老机器上常驻 CPU 的关键。
+        // - 正在「置顶唤回」：30ms 短间隔快速收敛（原有行为，仅十几帧）。
+        // - 有扫描在跑：扫描页自己按 ~30fps 刷新（见 scan_page / progress_ring）；
+        //   这里只留一个低频兜底（可见 250ms / 托盘 500ms），保证用户停在其它页面、
+        //   或窗口隐藏时，扫描事件仍能被排空、结果被记录。
+        // - 其余（闲置，无论窗口可见还是纯托盘）：**不安排任何定时重绘**。托盘/菜单
+        //   点击由 wakeup 转发线程唤醒，底部资源条由 sysmon 采样线程按 1Hz 唤醒，
+        //   Toast 有自己的短时定时器，键盘/鼠标输入本身就会触发重绘。
         let visible = ctx.input(|i| i.viewport().visible().unwrap_or(true));
-        let interval = if visible { 250 } else { 1000 };
-        ctx.request_repaint_after(Duration::from_millis(interval));
+        if self.activate_countdown > 0 {
+            ctx.request_repaint_after(Duration::from_millis(30));
+        } else {
+            let scan_running = {
+                let core = self.core.borrow();
+                core.quick.is_running() || core.full.is_running()
+            };
+            if scan_running {
+                ctx.request_repaint_after(Duration::from_millis(if visible {
+                    250
+                } else {
+                    500
+                }));
+            }
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.ensure_ui_resources(&ctx);
 
-        // 关闭按钮默认改成"最小化到托盘"，只有托盘菜单里的"退出"才真正关程序。
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_exit {
+        // 关闭按钮：关于打开时只关关于层（绝不连带关主窗口）；否则（且非真正退出）
+        // 最小化到托盘。
+        if ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            self.hide_to_tray(&ctx);
+            if self.lifecycle.borrow().about_open {
+                let mut lc = self.lifecycle.borrow_mut();
+                lc.about_open = false;
+                lc.about_standalone = false;
+                return;
+            } else if self.lifecycle.borrow().mode != RunMode::Quit && !self.allow_exit {
+                self.hide_to_tray(&ctx);
+                return;
+            }
+        }
+
+        let (about_open, about_standalone) = {
+            let lc = self.lifecycle.borrow();
+            (lc.about_open, lc.about_standalone)
+        };
+
+        // 隐藏到托盘（且没开关于）时整窗不绘制——既无可见内容，也避免出现"关掉关于
+        // 窗却留下主窗口"的错觉。
+        if self.window_hidden && !about_open {
             return;
         }
 
+        // 来自托盘的关于：独占整个窗口画关于页，不画主界面——背后是深色主题底，
+        // 看起来就是一张独立的关于窗口。关闭后由 reconcile 自动缩回托盘，不会残留主窗口。
+        if about_open && about_standalone {
+            crate::about_dialog::paint_about_fullscreen(ui);
+            return;
+        }
+
+        self.ensure_ui_resources(&ctx);
         self.toasts.retain(|t| !t.expired());
 
         #[cfg(not(windows))]
@@ -742,6 +967,11 @@ impl eframe::App for App {
             });
 
         widgets::show_toasts(&ctx, &self.toasts);
+
+        // 主窗内打开的关于（当前无入口，预留）：覆盖在主界面之上的居中模态。
+        if about_open && !about_standalone {
+            crate::about_dialog::paint_about_modal(&ctx);
+        }
     }
 }
 
@@ -1341,8 +1571,9 @@ fn scan_page(
                     state.request_cancel();
                 }
                 // 旋转环靠 time 推进、已用时长每秒变化、事件限流后还有积压要继续排空——
-                // 三者都需要持续重绘，否则一停下来界面就静止了。
-                ui.ctx().request_repaint();
+                // 三者都需要持续重绘，否则一停下来界面就静止了。限制在 ~30fps：动画
+                // 仍然流畅，但不会在老机器上按 vsync 满帧率白烧 CPU/GPU。
+                ui.ctx().request_repaint_after(Duration::from_millis(33));
             }
             ScanPhase::Done {
                 scanned,
@@ -1459,7 +1690,7 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
         // 第一次画这一栏时顺带查一次版本（只查这一次，之后靠"更新完成"事件刷新），
         // 避免每帧都拉起 clamscan 进程。更新成功后 `db_version` 会从旧值刷新成新值。
         if core.virus_db.db_version.is_none() {
-            core.virus_db.refresh_db_version();
+            core.virus_db.refresh_db_version(ui.ctx().clone());
         }
         let status = if available {
             "Built-in database ready"
@@ -1531,7 +1762,7 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
                 }
                 ui.add_space(BTN_GAP);
                 if action_button(ui, update_label, icons::database) && !core.virus_db.updating {
-                    core.virus_db.start_update();
+                    core.virus_db.start_update(ui.ctx().clone());
                     pending_toast = Some("Updating database…".to_string());
                 }
             },

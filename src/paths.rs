@@ -94,19 +94,21 @@ pub fn clamav_database_dir() -> PathBuf {
 
 /// 解析出"真实可用"的病毒库目录，供 `engine` 调 `clamscan` 时显式传 `--database=`。
 ///
-/// 优先级（返回第一个「真实存在」的目录）：
+/// 候选（按顺序）：
 /// 1. 随包内置的 `<exe>/clamav/database` —— 打包分发 ClamAV 时用（Windows/macOS 通用）。
 /// 2. macOS 系统安装默认位置 `/usr/local/clamav/share/clamav` —— 手动安装 ClamAV 的默认库目录。
 /// 3. macOS 用户级目录 `~/.clamav` —— 开发机免 sudo 方案（`freshclam.conf` 里指定的库目录）。
 ///
-/// 这样无论用哪种分发/部署方式，App 都能自动找到已有的病毒库，而不必依赖
-/// `clamscan` 的编译期默认目录（那在开发机上往往是空的、或 root 所有无权限）。
+/// 解析规则：优先返回「含真实签名文件（.cvd/.cld/.cud）」的目录。原因：开发机上
+/// `<exe>/clamav/database` 常常是个空目录占位（打包时才有真实库），不能因为它存在就
+/// 抢在用户已经下载好病毒库的 `~/.clamav` 之前；否则病毒库页会显示错误的空目录。
+/// 当所有候选都不含签名文件时，才退回第一个存在的目录（便于 `freshclam` 联网拉取后写入）。
 /// 都不存在时返回 `None`，此时 `engine` 不传 `--database=`，交给 clamscan 用其自身默认目录
 /// （通常也扫不了，会被可用性/错误路径正常拦下）。
 #[cfg(any(windows, target_os = "macos"))]
 pub fn resolved_clamav_database_dir() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
-    // 1. 内置（所有平台通用，优先级最高）
+    // 1. 内置（所有平台通用）
     candidates.push(clamav_database_dir());
     #[cfg(target_os = "macos")]
     {
@@ -117,7 +119,45 @@ pub fn resolved_clamav_database_dir() -> Option<PathBuf> {
             candidates.push(home.join(".clamav"));
         }
     }
+    // 优先：含签名文件的目录（开发机的空占位目录不会抢先）
+    for c in &candidates {
+        if has_signature_files(c) {
+            return Some(c.clone());
+        }
+    }
+    // 回退：都没有签名文件时，返回第一个存在的目录（供 freshclam 写入）
     candidates.into_iter().find(|p| p.is_dir())
+}
+
+/// 目录里是否含任意病毒库签名文件（.cvd/.cld/.cud）。
+#[cfg(any(windows, target_os = "macos"))]
+fn has_signature_files(dir: &std::path::Path) -> bool {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            if let Some(ext) = e.path().extension().and_then(|e| e.to_str()) {
+                if matches!(ext, "cvd" | "cld" | "cud") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// macOS 上 `freshclam` 必须读一个配置文件（含 `DatabaseMirror`/`DatabaseDirectory`，
+/// 且不能有官方示例的 `Example` 行），否则直接报 "Can't open/parse the config file"。
+/// 系统默认位置 `/usr/local/clamav/etc/freshclam.conf` 在手动安装时往往不存在，
+/// 所以这里优先用与病毒库同目录的 `~/.clamav/freshclam.conf`（开发机免 sudo 方案），
+/// 其次系统默认位置，再其次随包内置 `<exe>/clamav/freshclam.conf`。都没有则返回 None。
+#[cfg(target_os = "macos")]
+pub fn freshclam_config_path() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(db) = resolved_clamav_database_dir() {
+        candidates.push(db.join("freshclam.conf"));
+    }
+    candidates.push(PathBuf::from("/usr/local/clamav/etc/freshclam.conf"));
+    candidates.push(clamav_dir().join("freshclam.conf"));
+    candidates.into_iter().find(|p| p.is_file())
 }
 
 /// Windows / macOS 真实检查 `clamscan` 可执行文件（或 PATH 上的命令）是否存在；

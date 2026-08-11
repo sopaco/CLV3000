@@ -23,8 +23,12 @@ mod real {
 
     const MUTEX_NAME: &str = "Global\\CLV3000_SingleInstance_Mutex";
 
-    /// 如果已经有一个实例在跑，返回 `false`（调用者应该直接退出）。
+    /// 如果已经有一个实例在跑，返回 `false`（调用者应该直接退出并提示用户）。
     pub fn acquire() -> bool {
+        // 开发调试用：设置 `CLV3000_ALLOW_MULTIPLE_INSTANCES` 可绕过单实例锁。
+        if std::env::var_os("CLV3000_ALLOW_MULTIPLE_INSTANCES").is_some() {
+            return true;
+        }
         let name = HSTRING::from(MUTEX_NAME);
         // SAFETY: 不传自定义安全属性，名字是一个 'static 常量字符串对应的 HSTRING。
         let result = unsafe { CreateMutexW(None, true, &name) };
@@ -49,8 +53,13 @@ mod macos {
 
     const SOCK_NAME: &str = "clv3000.sock";
 
-    /// 如果已经有一个实例在跑，返回 `false`（调用者应该直接退出）。
+    /// 如果已经有一个实例在跑，返回 `false`（调用者应该直接退出并提示用户）。
     pub fn acquire() -> bool {
+        // 开发调试用：设置 `CLV3000_ALLOW_MULTIPLE_INSTANCES` 可绕过单实例锁，
+        // 强制启一个新实例（方便对比/测试新构建，而不必先揪出旧实例）。
+        if std::env::var_os("CLV3000_ALLOW_MULTIPLE_INSTANCES").is_some() {
+            return true;
+        }
         let dir = crate::paths::app_data_dir();
         let _ = std::fs::create_dir_all(&dir);
         let sock = dir.join(SOCK_NAME);
@@ -78,6 +87,46 @@ mod macos {
             }
         }
     }
+}
+
+/// 第二个实例启动时调用：弹一个原生提示，告诉用户"已经在运行、请先退出旧实例"，
+/// 避免静默退出让人误以为 `cargo run` 没生效、反复点到旧（可能有 bug 的）实例上。
+#[cfg(target_os = "macos")]
+pub fn notice_already_running() {
+    let script = "display alert \"CLV3000 已经在运行\" message \
+        \"CLV3000 的一个实例已在运行（通常在菜单栏托盘中）。请先在托盘菜单退出旧实例，\
+        再重新启动以加载最新版本。\" as warning";
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", script])
+        .status();
+}
+
+#[cfg(windows)]
+pub fn notice_already_running() {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
+
+    let text: Vec<u16> = "CLV3000 已经在运行。请先退出旧实例，再重新启动以加载最新版本。"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let caption: Vec<u16> = "CLV3000"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            PCWSTR(text.as_ptr()),
+            PCWSTR(caption.as_ptr()),
+            MB_OK | MB_ICONWARNING,
+        );
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn notice_already_running() {
+    eprintln!("CLV3000 is already running.");
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
