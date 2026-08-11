@@ -623,7 +623,10 @@ impl AppCore {
 /// 托盘/菜单事件：窗口与纯托盘循环共用。
 /// 事件来自 `wakeup` 模块的转发队列——转发线程阻塞在 tray-icon/muda 的全局
 /// channel 上，事件到达时已经替我们 `request_repaint` 唤醒了 UI，这里只管排空。
-pub fn poll_tray_events(tray: &Tray, core: &mut AppCore, lifecycle: &mut Lifecycle) {
+/// 排空托盘事件队列。返回 `true` 表示用户通过托盘请求把窗口带到前台（含窗口已可见但被
+/// 其它 App 遮挡、仅需置顶的情况）。
+pub fn poll_tray_events(tray: &Tray, core: &mut AppCore, lifecycle: &mut Lifecycle) -> bool {
+    let mut focus_requested = false;
     // 锁只在这一小段排空循环里持有，发送端（wakeup 转发线程）基本碰不到竞争。
     while let Ok(event) = crate::wakeup::tray_events().lock().unwrap().try_recv() {
         if let TrayIconEvent::DoubleClick { .. } = event {
@@ -631,6 +634,7 @@ pub fn poll_tray_events(tray: &Tray, core: &mut AppCore, lifecycle: &mut Lifecyc
             lifecycle.mode = RunMode::ShowWindow;
             lifecycle.about_open = false;
             lifecycle.about_standalone = false;
+            focus_requested = true;
         }
     }
 
@@ -641,20 +645,24 @@ pub fn poll_tray_events(tray: &Tray, core: &mut AppCore, lifecycle: &mut Lifecyc
             lifecycle.mode = RunMode::ShowWindow;
             lifecycle.about_open = false;
             lifecycle.about_standalone = false;
+            focus_requested = true;
         } else if id == &tray.ids.quick_scan {
             lifecycle.mode = RunMode::ShowWindow;
             lifecycle.about_open = false;
             lifecycle.about_standalone = false;
             core.page = Page::QuickScan;
             core.quick.start(core.config.scan_removable_drives);
+            focus_requested = true;
         } else if id == &tray.ids.about {
             // 来自托盘的关于：只占整个窗口画关于页，不画主界面（about_standalone）。
             lifecycle.about_open = true;
             lifecycle.about_standalone = true;
+            focus_requested = true;
         } else if id == &tray.ids.quit {
             lifecycle.mode = RunMode::Quit;
         }
     }
+    focus_requested
 }
 
 pub struct App {
@@ -689,6 +697,10 @@ pub struct App {
     /// （原生已 deminiaturize 但 egui 仍标记 minimized）。
     #[cfg(target_os = "macos")]
     macos_was_miniaturized: bool,
+    /// macOS：上一帧 `NSApplication::isActive` 是否为 true。用于检测 Dock 点击 /
+    /// Cmd+Tab 切回本 App 时把已可见但被其它窗口遮挡的窗口提到最前。
+    #[cfg(target_os = "macos")]
+    macos_was_active: bool,
 }
 
 /// 把 `icon_data::load_*_icon` 解出来的 `(rgba, w, h)` 传进 egui 的纹理系统，
@@ -734,6 +746,8 @@ impl App {
             size_intent: 0,
             #[cfg(target_os = "macos")]
             macos_was_miniaturized: false,
+            #[cfg(target_os = "macos")]
+            macos_was_active: crate::macos_reopen::is_app_active(),
         }
     }
 
@@ -802,12 +816,16 @@ impl App {
         // 只在局部作用域里轮询托盘事件并取出下一模式，再 drop 所有 RefCell 借用——
         // 真正的视口指令（显示/隐藏/退出）统一交给 `reconcile_lifecycle`，避免在此处
         // 同步重入 `logic()` 导致仍持有 `borrow_mut` 时 panic。
-        let next_mode = {
+        let (next_mode, tray_focus) = {
             let mut core = self.core.borrow_mut();
             let mut lifecycle = self.lifecycle.borrow_mut();
-            poll_tray_events(tray, &mut core, &mut lifecycle);
-            lifecycle.mode
+            let tray_focus = poll_tray_events(tray, &mut core, &mut lifecycle);
+            (lifecycle.mode, tray_focus)
         };
+
+        if tray_focus {
+            self.activate_countdown = self.activate_countdown.max(12);
+        }
 
         match next_mode {
             RunMode::Quit => {
@@ -941,6 +959,17 @@ impl eframe::App for App {
         if self.sync_macos_minimized_viewport(ctx) {
             // Dock 点回最小化窗口：与托盘唤回类似，连续几帧置顶更稳。
             self.activate_countdown = self.activate_countdown.max(12);
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let active = crate::macos_reopen::is_app_active();
+            // 窗口已可见但被其它 App 盖住时，点 Dock / Cmd+Tab 只会激活 App、不会自动
+            // 把 winit 窗口浮到最前；检测到 inactive→active 且非托盘隐藏态时主动置顶。
+            if active && !self.macos_was_active && !self.window_hidden {
+                self.activate_countdown = self.activate_countdown.max(12);
+            }
+            self.macos_was_active = active;
         }
 
         // 从托盘唤回后的几帧内，反复把窗口提到最前（见 macos_reopen::bring_to_front）。

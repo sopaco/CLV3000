@@ -64,6 +64,15 @@ mod imp {
         false
     }
 
+    /// 当前 App 是否为前台活跃应用（`NSApplication::isActive`）。
+    pub fn is_app_active() -> bool {
+        if let Some(mtm) = MainThreadMarker::new() {
+            let app = NSApplication::sharedApplication(mtm);
+            return app.isActive();
+        }
+        false
+    }
+
     /// 把窗口真正唤到最前（从托盘唤回主窗口 / 关于窗口时调用）。
     ///
     /// 仅靠 `NSApplication::activate()` 在 macOS 14+ 已经不够：苹果在 14 把
@@ -96,6 +105,9 @@ mod imp {
     pub fn set_accessory(_accessory: bool) {}
     pub fn is_miniaturized() -> bool {
         false
+    }
+    pub fn is_app_active() -> bool {
+        true
     }
     pub fn bring_to_front() {}
 }
