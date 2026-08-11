@@ -4,12 +4,12 @@
 mod about_dialog;
 mod app;
 mod clamav_info;
-mod macos_reopen;
 mod config;
 mod icon_data;
 mod icons;
 mod lifecycle;
 mod localtime;
+mod macos_reopen;
 mod paths;
 mod scan;
 mod single_instance;
@@ -20,7 +20,7 @@ mod wakeup;
 mod widgets;
 
 use app::AppCore;
-use lifecycle::{parse_start_tray_only, Lifecycle, RunMode};
+use lifecycle::{Lifecycle, RunMode, parse_start_tray_only};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -87,14 +87,7 @@ fn main() {
                 let _ = eframe::run_native(
                     "CLV3000",
                     native_options,
-                    Box::new(move |cc| {
-                        Ok(Box::new(app::App::new(
-                            cc,
-                            core,
-                            lifecycle,
-                            tray_slot,
-                        )))
-                    }),
+                    Box::new(move |cc| Ok(Box::new(app::App::new(cc, core, lifecycle, tray_slot)))),
                 );
             }
         }
@@ -102,7 +95,7 @@ fn main() {
 }
 
 /// 按平台配置窗口装饰：Windows 用系统标题栏（避免无边框时客户区顶部"幽灵标题栏"
-/// 导致鼠标坐标与 egui 绘制差一个标题栏高度）；macOS 开发预览继续自绘标题栏。
+/// 导致鼠标坐标与 egui 绘制差一个标题栏高度）；macOS 继续自绘标题栏。
 fn build_viewport(window_icon: egui::IconData) -> egui::ViewportBuilder {
     let mut builder = egui::ViewportBuilder::default()
         .with_title("CLV3000")

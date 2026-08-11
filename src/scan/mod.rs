@@ -40,22 +40,14 @@ pub enum ScanEvent {
     },
     /// 枚举完成、clamscan 即将启动（或已启动但还在加载病毒库、尚未产出结果）。
     /// 闪电扫描在进程枚举后发送；全盘扫描在磁盘 walk 结束后发送（带文件总数）。
-    ScanStarted {
-        total: Option<usize>,
-    },
+    ScanStarted { total: Option<usize> },
     /// 全盘扫描磁盘遍历中：已发现的可扫文件数（walk 完成前总数未知，靠此驱动 UI）。
-    WalkProgress {
-        files_found: usize,
-    },
+    WalkProgress { files_found: usize },
     /// clamscan 已启动、病毒库加载中；尚有 `remaining` 个文件待在引擎内扫描。
     /// 不切换 UI 阶段，进度仍随 `FileScanned` / `ScanningFile` 推进。
-    EngineLoading {
-        remaining: usize,
-    },
+    EngineLoading { remaining: usize },
     /// clamscan `-v` 的 `Scanning <path>` 行：文件已开始扫但尚未产出 OK/FOUND 行。
-    ScanningFile {
-        path: String,
-    },
+    ScanningFile { path: String },
     /// clamscan 对一个文件给出了结果。
     FileScanned {
         path: String,
@@ -68,7 +60,7 @@ pub enum ScanEvent {
         cancelled: bool,
     },
     /// 引擎不可用 / 启动失败等错误，不会中断已经展示的部分结果。
-    /// mock 引擎（非 Windows 开发预览）不会产生这个事件，所以该 target 上会报 dead_code。
+    /// mock 引擎（非 Windows 和 MacOS的 开发预览）不会产生这个事件，所以该 target 上会报 dead_code。
     #[allow(dead_code)]
     Error(String),
 }
