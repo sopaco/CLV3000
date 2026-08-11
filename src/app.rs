@@ -1165,7 +1165,7 @@ fn sidebar(ui: &mut egui::Ui, _ctx: &egui::Context, app: &mut App) {
         },
         SidebarItem {
             page: Page::FullScan,
-            draw: |p, r, s| icons::hard_drive(p, r, s),
+            draw: |p, r, s| icons::computer(p, r, s),
         },
         SidebarItem {
             page: Page::VirusDb,
@@ -1304,7 +1304,7 @@ fn dashboard_page(ui: &mut egui::Ui, _ctx: &egui::Context, app: &mut App) {
                     app.core.borrow_mut().quick.start(removable);
                 }
                 ui.add_space(BTN_GAP);
-                if action_button(ui, "Full Scan", icons::hard_drive) {
+                if action_button(ui, "Full Scan", icons::computer) {
                     let removable = app.core.borrow().config.scan_removable_drives;
                     app.navigate(Page::FullScan);
                     app.core.borrow_mut().full.start(removable);
@@ -1454,7 +1454,7 @@ fn full_scan_page(ui: &mut egui::Ui, app: &mut App) {
         &mut app.toasts,
         "Full Scan",
         colors::ACCENT_BLUE,
-        icons::hard_drive,
+        icons::computer,
         true,
     );
 }
@@ -1515,13 +1515,23 @@ fn scan_page(
                 // 仪表盘页那种"大圆环 + 图标"的视觉语言在这里也来一份，跟概览页
                 // 呼应，不然闪电扫描/全盘扫描的待机画面只有两行字，太空。这里没有
                 // 状态色（还没扫描，谈不上安全/危险），就用页面自己的强调色。
+                const IDLE_RING_GLYPH: f32 = 52.0;
+                // 全盘扫描的电脑图标在小圆环里偏小，单独放大 25%。
+                const FULL_SCAN_IDLE_RING_GLYPH_SCALE: f32 = 1.25;
+                let glyph_size = if state.kind == ScanKind::Full {
+                    IDLE_RING_GLYPH * FULL_SCAN_IDLE_RING_GLYPH_SCALE
+                } else {
+                    IDLE_RING_GLYPH
+                };
+
                 let (deco_resp, painter) =
                     ui.allocate_painter(Vec2::splat(120.0), egui::Sense::hover());
                 let deco_center = deco_resp.rect.center();
                 let deco_radius = 56.0;
                 painter.circle_filled(deco_center, deco_radius, colors::BG_CARD);
                 painter.circle_stroke(deco_center, deco_radius, Stroke::new(2.0, ring_color));
-                let deco_glyph = egui::Rect::from_center_size(deco_center, Vec2::splat(52.0));
+                let deco_glyph =
+                    egui::Rect::from_center_size(deco_center, Vec2::splat(glyph_size));
                 icon(&painter, deco_glyph, Stroke::new(2.0, ring_color));
 
                 ui.add_space(14.0);
