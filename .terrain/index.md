@@ -30,9 +30,9 @@ source: .
   - README.md
   - .cargo/
     - config.toml
-  - .workbuddy/
-    - memory/
   - .gitignore
+  - scripts/
+    - bundle-macos.sh
   - AGENTS.md
   - assets/
     - backgrounds/
