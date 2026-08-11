@@ -794,6 +794,15 @@ impl App {
                 let size = if intent == 1 { ABOUT_WINDOW_SIZE } else { MAIN_WINDOW_SIZE };
                 ctx.send_viewport_cmd(ViewportCommand::InnerSize(size.into()));
                 self.size_intent = intent;
+                if intent == 1 {
+                    // 关于窗刚打开：挪到屏幕正中央（只在这个边沿挪一次，之后用户可以
+                    // 自由拖动，不会被反复拽回中心）。无边框窗口 OuterPosition 即内容
+                    // 区左上角；取所在显示器的尺寸算居中。
+                    if let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) {
+                        let origin = ((monitor - Vec2::from(size)) / 2.0).max(Vec2::ZERO);
+                        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(origin.to_pos2()));
+                    }
+                }
             }
         } else if !self.window_hidden {
             // 进托盘态：先把视口藏起来，再切到 Accessory（离开 Dock）。
@@ -827,13 +836,6 @@ impl Drop for App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        eprintln!(
-            "FRAME {}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0)
-        ); // TEMP-INSTRUMENTATION
         self.poll_tray(ctx);
         self.reconcile_lifecycle(ctx);
 
@@ -1050,7 +1052,10 @@ fn title_bar(
                     ui.id().with("titlebar_drag"),
                     egui::Sense::drag(),
                 );
-                if drag_resp.drag_started() {
+                // 用 `is_pointer_button_down_on`（按下当帧就 StartDrag），不要用
+                // `drag_started`——后者要等越过拖拽阈值，系统 mouseDown 已过去，
+                // macOS 上会拖不动窗口（见 about_dialog.rs 同款说明）。
+                if drag_resp.is_pointer_button_down_on() {
                     ctx.send_viewport_cmd(ViewportCommand::StartDrag);
                 }
             }

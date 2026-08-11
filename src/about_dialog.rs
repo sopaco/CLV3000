@@ -71,9 +71,19 @@ pub fn paint_about_modal(ctx: &egui::Context) {
 }
 
 fn load_logo_texture(ctx: &egui::Context) -> TextureHandle {
+    // 每个会话只解码/上传一次，句柄缓存在 egui 的临时数据区。
+    // 之前每帧都重新解码内嵌 PNG 并重新上传纹理——只要鼠标在关于窗上移动/尝试拖动
+    // （指针事件会以满帧率触发重绘），每帧都重复这份编解码 + GPU 上传的重活，
+    // 表现为"关于窗一开就卡、CPU 飙升"。
+    let key = egui::Id::new(LOGO_TEX_ID);
+    if let Some(handle) = ctx.data_mut(|d| d.get_temp::<TextureHandle>(key)) {
+        return handle;
+    }
     let (rgba, w, h) = icon_data::load_app_icon_for_display(LOGO_DISPLAY_PT, ctx.pixels_per_point());
     let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
-    ctx.load_texture(LOGO_TEX_ID, image, egui::TextureOptions::LINEAR)
+    let handle = ctx.load_texture(LOGO_TEX_ID, image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(key, handle.clone()));
+    handle
 }
 
 fn paint_about_body(ui: &mut egui::Ui, logo: &TextureHandle, info: &ClamAvInfo) {
@@ -164,14 +174,20 @@ pub fn paint_about_fullscreen(ui: &mut egui::Ui) {
             }
             ui.horizontal_centered(|ui| {
                 ui.add_space(14.0);
-                widgets::bold_label(ui, "关于 CLV3000", 15.0, colors::TEXT_PRIMARY);
+                // 用英文标题：egui 默认字体（default_fonts）不含中文字形，
+                // 中文标题会渲染成豆腐块乱码；界面其余文案也全是英文，保持一致。
+                widgets::bold_label(ui, "About CLV3000", 15.0, colors::TEXT_PRIMARY);
             });
-            // 标题栏（除右侧关闭按钮区域外）可拖动窗口：圆点/文字那块叠一个拖拽区。
+            // 标题栏（除右侧关闭按钮区域外）可拖动窗口：文字那块叠一个拖拽区。
+            // 注意用 `is_pointer_button_down_on`（按下的那一帧就发 StartDrag），
+            // 不要用 `drag_started`——后者要等指针移动越过拖拽阈值才触发，此时
+            // 系统的 mouseDown 事件早已过去，winit 在 macOS 上做窗口拖动依赖
+            // "当前事件还是那次按下"，晚了就拖不动（表现：标题栏拖不动）。
             let drag_rect =
                 Rect::from_min_max(pos2(full_rect.left(), full_rect.top()), pos2(close_rect.left() - 4.0, full_rect.bottom()));
             if drag_rect.width() > 0.0 {
                 let drag_resp = ui.interact(drag_rect, ui.id().with("about_titlebar_drag"), Sense::drag());
-                if drag_resp.drag_started() {
+                if drag_resp.is_pointer_button_down_on() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
             }
