@@ -43,6 +43,27 @@ mod imp {
         }
     }
 
+    /// 主窗口是否处于 macOS 原生「最小化到 Dock」状态（`NSWindow::isMiniaturized`）。
+    ///
+    /// egui-winit 在 macOS 上**运行时**不会刷新 `ViewportInfo::minimized`（避免
+    /// `window.is_minimized()` 死锁，见 egui #3494），但 `Minimized(true)` 命令会
+    /// 把 `minimized` 置为 `Some(true)`。用户从 Dock 点回窗口时，原生窗口已恢复、
+    /// 而 egui 仍认为 minimized → `visible()` 为 false → `ui()` 整帧跳过，界面卡死。
+    /// 用本函数读真实窗口状态，与 egui 缓存对比后补发 `Minimized(false)` 即可。
+    pub fn is_miniaturized() -> bool {
+        if let Some(mtm) = MainThreadMarker::new() {
+            let app = NSApplication::sharedApplication(mtm);
+            let windows = app.windows();
+            let count = windows.count();
+            for i in 0..count {
+                if windows.objectAtIndex(i).isMiniaturized() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// 把窗口真正唤到最前（从托盘唤回主窗口 / 关于窗口时调用）。
     ///
     /// 仅靠 `NSApplication::activate()` 在 macOS 14+ 已经不够：苹果在 14 把
@@ -73,6 +94,9 @@ mod imp {
 #[allow(dead_code)]
 mod imp {
     pub fn set_accessory(_accessory: bool) {}
+    pub fn is_miniaturized() -> bool {
+        false
+    }
     pub fn bring_to_front() {}
 }
 

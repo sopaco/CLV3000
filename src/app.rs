@@ -684,6 +684,11 @@ pub struct App {
     /// 当前窗口尺寸的「意图」：0 = 主窗口尺寸，1 = 关于独占窗口尺寸。只在意图变化
     /// 时才发 `InnerSize` 指令，避免每帧重置、干扰用户对主窗口的手动缩放。
     size_intent: u8,
+    /// macOS：上一帧 `NSWindow::isMiniaturized` 是否为 true。用于区分「正在最小化」
+    /// （egui 已标记 minimized 但原生窗口尚未 miniaturize）与「从 Dock 恢复」
+    /// （原生已 deminiaturize 但 egui 仍标记 minimized）。
+    #[cfg(target_os = "macos")]
+    macos_was_miniaturized: bool,
 }
 
 /// 把 `icon_data::load_*_icon` 解出来的 `(rgba, w, h)` 传进 egui 的纹理系统，
@@ -727,6 +732,8 @@ impl App {
             window_hidden,
             activate_countdown: 0,
             size_intent: 0,
+            #[cfg(target_os = "macos")]
+            macos_was_miniaturized: false,
         }
     }
 
@@ -887,6 +894,33 @@ impl App {
             self.toast(msg);
         }
     }
+
+    /// macOS：把 egui 里陈旧的 `minimized` 标记与 `NSWindow` 真实状态对齐。
+    ///
+    /// 用户点标题栏最小化后从 Dock 恢复时，原生窗口已 deminiaturize，但 egui-winit
+    /// 不会在运行时刷新 minimized（防死锁），`ui()` 会被跳过。仅在检测到「上一帧已
+    /// miniaturize、本帧已 deminiaturize、但 egui 仍标记 minimized」时补发
+    /// `Minimized(false)`——避免在最小化动画尚未完成时误把最小化指令抵消。
+    ///
+    /// 返回 `true` 表示刚完成「从最小化恢复」的对齐（可顺带触发置顶唤回）。
+    #[cfg(target_os = "macos")]
+    fn sync_macos_minimized_viewport(&mut self, ctx: &egui::Context) -> bool {
+        if self.window_hidden {
+            self.macos_was_miniaturized = false;
+            return false;
+        }
+        let now_miniaturized = crate::macos_reopen::is_miniaturized();
+        let stale_minimized = ctx.input(|i| i.viewport().minimized == Some(true));
+        let restored_from_dock =
+            stale_minimized && !now_miniaturized && self.macos_was_miniaturized;
+        self.macos_was_miniaturized = now_miniaturized;
+        if restored_from_dock {
+            ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+            ctx.request_repaint();
+            return true;
+        }
+        false
+    }
 }
 
 impl Drop for App {
@@ -902,6 +936,12 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_tray(ctx);
         self.reconcile_lifecycle(ctx);
+
+        #[cfg(target_os = "macos")]
+        if self.sync_macos_minimized_viewport(ctx) {
+            // Dock 点回最小化窗口：与托盘唤回类似，连续几帧置顶更稳。
+            self.activate_countdown = self.activate_countdown.max(12);
+        }
 
         // 从托盘唤回后的几帧内，反复把窗口提到最前（见 macos_reopen::bring_to_front）。
         // macOS 14+ 下单次 activate 抢不到焦点，必须连续几帧 orderFrontRegardless 才稳。
