@@ -50,8 +50,9 @@ source: .
     - theme.rs
     - tray.rs
     - clamav_info.rs
+    - wakeup.rs
+    - macos_reopen.rs
     - scan/
-    - tray_pump.rs
     - about_dialog.rs
     - localtime.rs
     - main.rs
@@ -59,4 +60,3 @@ source: .
     - app.rs
     - widgets.rs
     - single_instance.rs
-    - tray_loop.rs

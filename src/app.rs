@@ -301,6 +301,10 @@ impl VirusDbState {
         let update_result = match self.rx.as_ref().map(|rx| rx.try_recv()) {
             Some(Ok(r)) => {
                 self.updating = false;
+                // 必须同时清掉已完成的 Receiver：发送端（后台线程）已销毁，
+                // 若留着它，下一帧 try_recv 会得到 Disconnected，把一次成功的
+                // 更新误报成 "Update thread stopped unexpectedly"。
+                self.rx = None;
                 Some(r)
             }
             Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
