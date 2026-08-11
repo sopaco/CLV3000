@@ -120,3 +120,4 @@ graph LR
 | 启动装配 / 单实例 | `src/main.rs`+`src/single_instance.rs` | viewport 构建、图标、`wakeup::init`、`acquire`/`notice_already_running`（Windows Mutex / macOS socket） |
 | 图标资产 | `src/icons.rs`+`src/icon_data.rs` | 手绘矢量 + PNG 解码 RGBA 程序图标 |
 | UI 原语与主题 | `src/widgets.rs`+`src/theme.rs` | progress_ring/stat_pill/threat_card/Toast；深色令牌 |
+```

@@ -9,9 +9,11 @@
 //! 容量控制（低端机友好）：
 //! - 条目上限 `MAX_ENTRIES`，超过后按"最久未用（last_used）"淘汰，避免无限膨胀占满内存/磁盘。
 //! - 每条记录带 TTL（默认 30 天），过期的在每次压缩落盘时物理删除；加载超大旧缓存时也会先裁剪。
-//! - 缓存文件超过 `COMPACT_THRESHOLD` 或条目超上限时触发压缩重写。
+//! - 每次扫描结束 `save()` 都会把内存索引整体重写落盘（compact）；条目超 `MAX_ENTRIES` 时额外触发 LRU 淘汰。
 //!
-//! 存放位置：`%APPDATA%\CLV3000\scan_cache.tsv`（见 `paths::app_data_dir`）。
+//! 存放位置：由 `paths::app_data_dir()` 决定——Windows 为
+//! `%APPDATA%\CLV3000\scan_cache.tsv`，macOS 为
+//! `~/Library/Application Support/CLV3000\scan_cache.tsv`（Linux 为假引擎占位目录）。
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -21,8 +23,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 缓存结果超过这个时长（秒）就当失效，重新扫一次。默认 30 天。
 const TTL_SECS: i64 = 30 * 24 * 3600;
-/// 缓存文件超过这个体积（字节）就在保存时压缩重写，避免无限膨胀。
-const COMPACT_THRESHOLD: u64 = 32 * 1024 * 1024;
 /// 缓存条目上限。超过后按最久未用淘汰，避免低端机内存被撑爆。
 /// 估算：每条约 80~130 字节（哈希+结果+整型），20 万条约 16~26 MB。
 const MAX_ENTRIES: usize = 200_000;
@@ -40,7 +40,6 @@ pub struct ScanCache {
     path: PathBuf,
     index: HashMap<String, Record>,
     current_rev: u64,
-    append: Option<File>,
     #[allow(dead_code)]
     disabled: bool,
 }
@@ -94,7 +93,7 @@ impl ScanCache {
                 index.remove(&h);
             }
         }
-        ScanCache { path: path.to_path_buf(), index, current_rev, append: None, disabled: false }
+        ScanCache { path: path.to_path_buf(), index, current_rev, disabled: false }
     }
 
     /// 命中且未过期且病毒库版本一致 → 返回上次结果（"clean" 或病毒名），否则 None。
@@ -150,18 +149,18 @@ impl ScanCache {
         let _ = self.compact();
     }
 
-    /// 收尾：关闭追加句柄；若文件过大或条目超上限则压缩重写（同时物理删除过期条目）。
+    /// 收尾：把内存里的索引整体落盘（compact 跳过已过期条目、其余全量重写），
+    /// 保证"文件基因缓存"能真正跨次复用。
+    ///
+    /// 注意：这里**无条件**重写，而不是只在"文件已 >32MB 或条目 >20 万"时才写——
+    /// 旧逻辑下普通闪电/全盘扫描只碰几百~几千个文件，永远触不到压缩阈值，
+    /// 导致 `save()` 直接 return、缓存只活在内存里、扫描线程结束后被丢弃，
+    /// 加速特性彻底失效。每次扫描结束落一次盘（最多 20 万条、几十 MB）开销可忽略。
     pub fn save(&mut self) {
         if self.disabled {
             return;
         }
-        self.append = None; // drop → flush + close
-        let over_size = std::fs::metadata(&self.path)
-            .map(|m| m.len() > COMPACT_THRESHOLD)
-            .unwrap_or(false);
-        if over_size || self.index.len() > MAX_ENTRIES {
-            let _ = self.compact();
-        }
+        let _ = self.compact();
     }
 
     /// 压缩重写：只保留未过期条目，并把它们落盘（5 列：hash\tresult\tts\tdbrev\tlast_used）。
@@ -170,7 +169,14 @@ impl ScanCache {
         let now = now_secs();
         let tmp = self.path.with_extension("compact.tmp");
         {
-            let mut f = match OpenOptions::new().create(true).truncate(true).open(&tmp) {
+            // 关键：必须带 `.write(true)`，否则 `create`/`truncate` 会因"无写权限"直接失败、
+            // 导致本条缓存永远写不进磁盘（旧代码就漏了这步，缓存从不存在任何落盘）。
+            let mut f = match OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&tmp)
+            {
                 Ok(f) => f,
                 Err(_) => return false,
             };
@@ -192,12 +198,10 @@ impl ScanCache {
                 let _ = std::fs::remove_file(&tmp);
                 let _ = std::fs::remove_file(&self.path);
                 self.index.clear();
-                self.append = None;
                 return true;
             }
         }
         let _ = std::fs::rename(&tmp, &self.path);
-        self.append = None;
         true
     }
 }
@@ -267,4 +271,43 @@ fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// 验证修复：insert 后 `save()` 必须真正把索引落盘，且重新打开能命中。
+    /// 这正是之前坏掉的行为——旧 `save()` 只在文件 >32MB 或条目 >20 万时才写。
+    #[test]
+    fn save_persists_and_reload_hits() {
+        let dir = std::env::temp_dir().join("clv3000_cache_test");
+        let _ = fs::create_dir_all(&dir);
+        let db = dir.join("db");
+        let _ = fs::create_dir_all(&db);
+        let path = dir.join("scan_cache.tsv");
+        let _ = fs::remove_file(&path);
+
+        // 首次：空缓存 → 插入 → 保存
+        {
+            let mut cache = ScanCache::open(&path, &db);
+            assert!(!path.exists(), "保存前不应有缓存文件");
+            cache.insert("deadbeef", "clean");
+            cache.insert("cafebabe", "Win.Test.EICAR_HDB-1");
+            cache.save();
+        }
+        assert!(path.exists(), "save() 后必须生成 scan_cache.tsv");
+
+        // 二次打开：应能命中上次结果（同一病毒库目录 → 同 dbrev）
+        let mut cache2 = ScanCache::open(&path, &db);
+        assert_eq!(cache2.lookup("deadbeef"), Some("clean".to_string()));
+        assert_eq!(
+            cache2.lookup("cafebabe"),
+            Some("Win.Test.EICAR_HDB-1".to_string())
+        );
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
