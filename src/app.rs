@@ -897,6 +897,13 @@ impl App {
             // 进托盘态：先把视口藏起来，再切到 Accessory（离开 Dock）。
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
             self.window_hidden = true;
+            // 必须同步清零「置顶唤回」倒计数——否则接下来若干帧 `bring_to_front()`
+            // 会调 `NSWindow::orderFrontRegardless()`，该方法无视 winit 刚发出的
+            // `Visible(false)`（即 `orderOut:`），把已隐藏的窗口再次强制可见并置顶；
+            // 而 `ui()` 又因 `window_hidden && !about_open` 整帧跳过不画内容，
+            // 用户就会在关闭窗口后看到一张与窗口同尺寸的纯黑空背景短暂闪现
+            // （"关掉又冒出黑底"现象的根因）。
+            self.activate_countdown = 0;
             #[cfg(target_os = "macos")]
             crate::macos_reopen::set_accessory(true);
         } else {
@@ -974,10 +981,18 @@ impl eframe::App for App {
 
         // 从托盘唤回后的几帧内，反复把窗口提到最前（见 macos_reopen::bring_to_front）。
         // macOS 14+ 下单次 activate 抢不到焦点，必须连续几帧 orderFrontRegardless 才稳。
+        // 防御：若窗口已被隐藏（任何路径把 `window_hidden` 置 true 都应同时清零倒计数，
+        // 这里再做一次兜底），绝不能继续 `bring_to_front()`——`orderFrontRegardless()`
+        // 会强制把已 orderOut 的 NSWindow 重新可见，覆盖刚发出的 `Visible(false)`，
+        // 同时 `request_repaint_after(30ms)` 会因倒计数不清零而持续触发，造成闲置 CPU。
         if self.activate_countdown > 0 {
-            #[cfg(target_os = "macos")]
-            crate::macos_reopen::bring_to_front();
-            self.activate_countdown -= 1;
+            if !self.window_hidden {
+                #[cfg(target_os = "macos")]
+                crate::macos_reopen::bring_to_front();
+                self.activate_countdown -= 1;
+            } else {
+                self.activate_countdown = 0;
+            }
         }
 
         self.poll_background(ctx);

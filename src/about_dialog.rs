@@ -14,13 +14,13 @@ use crate::clamav_info::ClamAvInfo;
 use crate::icon_data;
 use crate::theme::{self, colors};
 use crate::widgets;
-use egui::{pos2, Align2, CursorIcon, Frame, Key, Rect, Sense, Stroke, TextureHandle, Vec2};
+use egui::{Align2, CursorIcon, Frame, Key, Rect, Sense, Stroke, TextureHandle, Vec2, pos2};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const LOGO_TEX_ID: &str = "clv3000_about_logo";
 /// 关于弹窗 logo 的 UI 逻辑尺寸（pt）。
 const LOGO_DISPLAY_PT: f32 = 88.0;
-const SIZE: [f32; 2] = [400.0, 340.0];
+const SIZE: [f32; 2] = [410.0, 340.0];
 
 /// 关于窗关闭信号：OK / Esc / 窗口关闭按钮都会置位，`App::logic` 据此关闭覆盖层。
 /// 用全局原子量是因为「关闭」发生在 UI 绘制阶段，而关闭处理在 logic 阶段，二者跨方法，
@@ -79,7 +79,8 @@ fn load_logo_texture(ctx: &egui::Context) -> TextureHandle {
     if let Some(handle) = ctx.data_mut(|d| d.get_temp::<TextureHandle>(key)) {
         return handle;
     }
-    let (rgba, w, h) = icon_data::load_app_icon_for_display(LOGO_DISPLAY_PT, ctx.pixels_per_point());
+    let (rgba, w, h) =
+        icon_data::load_app_icon_for_display(LOGO_DISPLAY_PT, ctx.pixels_per_point());
     let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
     let handle = ctx.load_texture(LOGO_TEX_ID, image, egui::TextureOptions::LINEAR);
     ctx.data_mut(|d| d.insert_temp(key, handle.clone()));
@@ -88,7 +89,7 @@ fn load_logo_texture(ctx: &egui::Context) -> TextureHandle {
 
 fn paint_about_body(ui: &mut egui::Ui, logo: &TextureHandle, info: &ClamAvInfo) {
     ui.vertical_centered(|ui| {
-        ui.add_space(8.0);
+        ui.add_space(5.0);
         ui.add(
             egui::Image::new((logo.id(), logo.size_vec2()))
                 .fit_to_exact_size(Vec2::splat(LOGO_DISPLAY_PT))
@@ -183,10 +184,16 @@ pub fn paint_about_fullscreen(ui: &mut egui::Ui) {
             // 不要用 `drag_started`——后者要等指针移动越过拖拽阈值才触发，此时
             // 系统的 mouseDown 事件早已过去，winit 在 macOS 上做窗口拖动依赖
             // "当前事件还是那次按下"，晚了就拖不动（表现：标题栏拖不动）。
-            let drag_rect =
-                Rect::from_min_max(pos2(full_rect.left(), full_rect.top()), pos2(close_rect.left() - 4.0, full_rect.bottom()));
+            let drag_rect = Rect::from_min_max(
+                pos2(full_rect.left(), full_rect.top()),
+                pos2(close_rect.left() - 4.0, full_rect.bottom()),
+            );
             if drag_rect.width() > 0.0 {
-                let drag_resp = ui.interact(drag_rect, ui.id().with("about_titlebar_drag"), Sense::drag());
+                let drag_resp = ui.interact(
+                    drag_rect,
+                    ui.id().with("about_titlebar_drag"),
+                    Sense::drag(),
+                );
                 if drag_resp.is_pointer_button_down_on() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
@@ -232,6 +239,10 @@ fn about_title_close_button(ui: &mut egui::Ui, rect: Rect) -> bool {
     if response.hovered() {
         ui.painter().rect_filled(rect, 6.0, colors::ACCENT_BLUE_BG);
     }
-    crate::icons::close(ui.painter(), rect.shrink(9.0), Stroke::new(1.4, colors::TEXT_SECONDARY));
+    crate::icons::close(
+        ui.painter(),
+        rect.shrink(9.0),
+        Stroke::new(1.4, colors::TEXT_SECONDARY),
+    );
     response.clicked()
 }
