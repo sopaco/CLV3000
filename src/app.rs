@@ -803,11 +803,19 @@ impl App {
     fn hide_to_tray(&mut self, ctx: &egui::Context) {
         // 释放 GPU 纹理与资源监控，但**不关闭** eframe 会话——eframe 事件循环（以及
         // 其背后的 AppKit / winit 消息泵）必须一直存活，托盘图标的菜单点击才能被
-        // 系统正常投递。真正"关闭窗口"改成把视口藏起来（`Visible(false)`），由
-        // `reconcile_lifecycle` 对账到真实的视口可见性（并在隐藏态把 App 的激活策略
-        // 切到 Accessory，从而离开 Dock——见 src/macos_reopen.rs）。
+        // 系统正常投递。真正"关闭窗口"改成把视口藏起来（`Visible(false)`）。
         self.release_ui_resources(ctx);
         self.lifecycle.borrow_mut().mode = RunMode::TrayOnly;
+        // 立即发 `Visible(false)` 并置 `window_hidden`，而不是等下一帧 reconcile——
+        // `Visible` 是异步指令（winit 在本帧结束才真正 `orderOut`），越早发越早生效。
+        // 若拖到下一帧 reconcile 发，则下一帧 `ui()` 会在仍可见的窗口上因 `window_hidden`
+        // 早退、画一帧纯背景色，用户就看到"关闭时闪一下"。立即发则 winit 在本帧结束就
+        // 藏窗口，下一帧 `ui()` 跑在已隐藏窗口上，无可见闪烁。同时清零 `activate_countdown`，
+        // 避免隐藏后倒计数继续 `orderFrontRegardless` 把窗口又拉可见（见 skill 第 7 节）。
+        // Accessory 策略由 reconcile 的"已隐藏"分支下一帧补上（窗口已藏，1 帧延迟无碍）。
+        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        self.window_hidden = true;
+        self.activate_countdown = 0;
     }
 
     fn poll_tray(&mut self, ctx: &egui::Context) {
@@ -977,18 +985,11 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_tray(ctx);
 
-        // 「关于」关闭（OK / Esc / 窗口关闭按钮都会置位 ABOUT_CLOSED）：必须在
-        // `reconcile_lifecycle` **之前**消费——否则关闭关于的那帧 reconcile 仍看到
-        // `about_open=true`、不发 `Visible(false)`，紧接着 `ui()` 看到 `about_open`
-        // 已清而 `window_hidden` 还是 false，就把主界面画进仍可见的（关于尺寸）窗口，
-        // 用户会看到"关于窗内部闪一下主窗口内容"再关闭。提前到此处消费后，reconcile
-        // 当帧就会发 `Visible(false)` 并置 `window_hidden=true`，`ui()` 整帧早退不画。
-        if self.lifecycle.borrow().about_open && crate::about_dialog::take_closed() {
-            let mut lc = self.lifecycle.borrow_mut();
-            lc.about_open = false;
-            lc.about_standalone = false;
-        }
-
+        // 「关于」关闭信号 ABOUT_CLOSED 改在 ui() 阶段消费（paint_about_fullscreen 之后
+        // 当场调 hide_to_tray 藏窗口），不在 logic 里消费。logic 在 ui 之前跑，若在这里
+        // 消费会让 reconcile 当帧发 Visible(false)，紧接着 ui() 在仍可见窗口上早退画一帧
+        // 纯背景色 → "关闭时闪一下"。ui 阶段消费则 winit 在该帧结束就藏窗口，下一帧
+        // ui() 跑在已隐藏窗口上，无可见闪烁。详见 ui() 里 paint_about_fullscreen 之后。
         self.reconcile_lifecycle(ctx);
 
         #[cfg(target_os = "macos")]
@@ -1062,9 +1063,17 @@ impl eframe::App for App {
         if ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             if self.lifecycle.borrow().about_open {
-                let mut lc = self.lifecycle.borrow_mut();
-                lc.about_open = false;
-                lc.about_standalone = false;
+                let mode = self.lifecycle.borrow().mode;
+                {
+                    let mut lc = self.lifecycle.borrow_mut();
+                    lc.about_open = false;
+                    lc.about_standalone = false;
+                }
+                // 来自托盘的关于（TrayOnly）连窗口一起藏（hide_to_tray 立即发 Visible(false)），
+                // 否则要等下一帧 reconcile 才藏，中间一帧 ui() 会画纯背景色 → 闪一下。
+                if mode == RunMode::TrayOnly {
+                    self.hide_to_tray(&ctx);
+                }
                 return;
             } else if self.lifecycle.borrow().mode != RunMode::Quit && !self.allow_exit {
                 self.hide_to_tray(&ctx);
@@ -1087,6 +1096,28 @@ impl eframe::App for App {
         // 看起来就是一张独立的关于窗口。关闭后由 reconcile 自动缩回托盘，不会残留主窗口。
         if about_open && about_standalone {
             crate::about_dialog::paint_about_fullscreen(ui);
+            // 在 ui 阶段消费关闭信号（OK / Esc / 标题关闭按钮都在 paint_about_fullscreen
+            // 内置位 ABOUT_CLOSED），并当场藏窗口。关于关闭的两类问题都靠这一处：
+            // - 之前若在 logic 消费（take_closed 在 reconcile 前）→ reconcile 当帧发
+            //   Visible(false)，但 ui() 紧跟其后在仍可见窗口上早退画一帧纯背景色
+            //   → "关闭时闪一下"。
+            // - 更早若在 logic 的 reconcile 之后消费 → reconcile 看到 about_open=true
+            //   不发 Visible(false)，ui() 接着把主界面画进仍可见的关于窗 → "闪现主窗内容"。
+            // 改在 ui 阶段（paint_about 之后）消费 + 立即 hide_to_tray，winit 本帧结束
+            // 就藏窗口，下一帧 ui() 跑在已隐藏窗口上，既无纯背景闪、也无主窗内容闪。
+            if crate::about_dialog::take_closed() {
+                let mode = self.lifecycle.borrow().mode;
+                {
+                    let mut lc = self.lifecycle.borrow_mut();
+                    lc.about_open = false;
+                    lc.about_standalone = false;
+                }
+                // 来自托盘的关于（mode=TrayOnly）：连窗口一起藏；主窗可见时
+                // （mode=ShowWindow）只关关于层，主窗下一帧自然接管。
+                if mode == RunMode::TrayOnly {
+                    self.hide_to_tray(&ctx);
+                }
+            }
             return;
         }
 
