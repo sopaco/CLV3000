@@ -17,18 +17,14 @@ use crate::widgets;
 use egui::{Align2, Frame, Key, TextureHandle, Vec2};
 // 以下导入仅 macOS 自绘标题栏使用（Windows 用系统标题栏，不编译相关代码）。
 #[cfg(not(windows))]
-use egui::{CursorIcon, Rect, Sense, Stroke, pos2};
+use egui::{pos2, CursorIcon, Rect, Sense, Stroke};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const LOGO_TEX_ID: &str = "clv3000_about_logo";
 /// 关于弹窗 logo 的 UI 逻辑尺寸（pt）。
 const LOGO_DISPLAY_PT: f32 = 88.0;
 
-#[cfg(not(windows))]
 const SIZE: [f32; 2] = [410.0, 340.0];
-
-#[cfg(windows)]
-const SIZE: [f32; 2] = [410.0, 340.0 - 44.0];
 
 /// 关于窗关闭信号：OK / Esc / 窗口关闭按钮都会置位，`App::logic` 据此关闭覆盖层。
 /// 用全局原子量是因为「关闭」发生在 UI 绘制阶段，而关闭处理在 logic 阶段，二者跨方法，
