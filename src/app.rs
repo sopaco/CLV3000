@@ -976,6 +976,19 @@ impl Drop for App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_tray(ctx);
+
+        // 「关于」关闭（OK / Esc / 窗口关闭按钮都会置位 ABOUT_CLOSED）：必须在
+        // `reconcile_lifecycle` **之前**消费——否则关闭关于的那帧 reconcile 仍看到
+        // `about_open=true`、不发 `Visible(false)`，紧接着 `ui()` 看到 `about_open`
+        // 已清而 `window_hidden` 还是 false，就把主界面画进仍可见的（关于尺寸）窗口，
+        // 用户会看到"关于窗内部闪一下主窗口内容"再关闭。提前到此处消费后，reconcile
+        // 当帧就会发 `Visible(false)` 并置 `window_hidden=true`，`ui()` 整帧早退不画。
+        if self.lifecycle.borrow().about_open && crate::about_dialog::take_closed() {
+            let mut lc = self.lifecycle.borrow_mut();
+            lc.about_open = false;
+            lc.about_standalone = false;
+        }
+
         self.reconcile_lifecycle(ctx);
 
         #[cfg(target_os = "macos")]
@@ -1012,15 +1025,6 @@ impl eframe::App for App {
         }
 
         self.poll_background(ctx);
-
-        // 「关于」关闭（OK / Esc / 窗口关闭按钮都会置位 ABOUT_CLOSED）：只关掉关于层，
-        // 主窗口的去留由生命周期模式决定——来自托盘（`TrayOnly`）时下一帧 reconcile
-        // 会自动把视口重新藏起来，不会残留主窗口。
-        if self.lifecycle.borrow().about_open && crate::about_dialog::take_closed() {
-            let mut lc = self.lifecycle.borrow_mut();
-            lc.about_open = false;
-            lc.about_standalone = false;
-        }
 
         if let Some(sysmon) = &self.sysmon
             && let Ok(sample) = sysmon.rx.try_recv()
