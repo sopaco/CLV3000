@@ -12,7 +12,7 @@
 
 use crate::clamav_info::ClamAvInfo;
 use crate::icon_data;
-use crate::theme::{self, colors};
+use crate::theme::colors;
 use crate::widgets;
 use egui::{Align2, CursorIcon, Frame, Key, Rect, Sense, Stroke, TextureHandle, Vec2, pos2};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,7 +42,10 @@ pub fn take_closed() -> bool {
 /// 用户点 OK / 按 Esc / 点窗口关闭按钮即视为关闭，置 `ABOUT_CLOSED`，由 `App::logic`
 /// 据此关掉覆盖层。整窗底色（主界面）由调用方在下方已经画好。
 pub fn paint_about_modal(ctx: &egui::Context) {
-    theme::apply(ctx);
+    // 主题（visuals/styles）由 `App::new` 在会话建立时调一次 `theme::apply` 即可，
+    // egui 不会在帧间重置它们。这里曾每帧都 `theme::apply`，会失效 egui 的
+    // visuals/styles 缓存、强制重新布局——关于窗打开期间鼠标移动以满帧率触发重绘，
+    // 每帧重设 visuals 把开销放大成持续微卡顿 + CPU。详见 skill 第 2 节。
 
     let logo = load_logo_texture(ctx);
     let info = cached_info();
@@ -148,7 +151,9 @@ const ABOUT_TITLE_BAR_HEIGHT: f32 = 44.0;
 /// 把视口重新藏回托盘（或恢复原主窗口尺寸）。
 pub fn paint_about_fullscreen(ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
-    theme::apply(&ctx);
+    // 主题由 `App::new` 调一次 `theme::apply` 即可，不在每帧重复设置——每帧重设
+    // visuals/styles 会失效 egui 缓存、强制重新布局，鼠标在关于窗上移动时以满帧率
+    // 触发重绘，把开销放大成持续卡顿。详见 skill 第 2 节。
 
     let logo = load_logo_texture(&ctx);
     let info = cached_info();
