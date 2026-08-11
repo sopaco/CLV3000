@@ -54,3 +54,15 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Windows exe 文件属性（右键 → 属性 → 详细信息）的版本信息资源。
+# [package.metadata.winresource] 的字段会覆盖 winresource 的默认值
+# （默认 FileDescription / ProductName 都取自 CARGO_PKG_NAME = "clv3000"）。
+# 仅在编译 Windows 目标时由 build.rs 里的 winresource 写入 PE 资源段。
+[package.metadata.winresource]
+ProductName     = "CLV3000"
+FileDescription = "Fast, reliable virus protection for even older PCs."
+CompanyName     = "SGNetworks"
+LegalCopyright  = "Copyright © 2026 SGNetworks"
+InternalName    = "clv3000"
+OriginalFilename = "clv3000.exe"
