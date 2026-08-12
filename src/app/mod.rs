@@ -35,15 +35,38 @@ const MAIN_WINDOW_SIZE: [f32; 2] = [900.0, 600.0];
 const ABOUT_WINDOW_SIZE: [f32; 2] = [480.0, 460.0];
 
 /// 从托盘唤回窗口后的「置顶倒计时」帧数。macOS 14+ 下单次 `activate()` 抢不到
-/// 焦点，需要连续若干帧 `orderFrontRegardless` 才稳定（12 帧 ≈ 360ms）。Windows
+/// 焦点，需要连续若干帧 `orderFrontRegardless` 才稳定。Windows
 /// 下由 wakeup 线程在用户手势权限窗口内直接 `SetForegroundWindow`（主路径），
 /// 这里只需 2 帧兜底：第 1 帧窗口可能还没真正可见（`Visible(true)` 是异步的），
 /// 第 2 帧窗口已可见、`AttachThreadInput` 把它拉到前台。更多的帧会导致
 /// `AttachThreadInput` 反复 attach/detach → 标题栏闪动 + 最终失焦。
+///
+/// 这是"最多重试几次"的上限，不是"每次都会跑满"——`bring_to_front()` 一旦发现
+/// App/窗口状态已经符合预期就会提前收敛（见 `logic()` 里 `activate_countdown` 的
+/// 使用处），多数场景（窗口只是被遮挡、非最小化/托盘）1 帧内就结束，这个上限只
+/// 兜底真正需要多帧才能稳定下来的场景（托盘唤回、从最小化恢复）。
 #[cfg(target_os = "macos")]
 const ACTIVATE_FRAMES: u8 = 12;
 #[cfg(not(target_os = "macos"))]
 const ACTIVATE_FRAMES: u8 = 2;
+
+/// 「置顶倒计时」期间两次重试之间的间隔。之前固定 30ms，跟 macOS 自己"把窗口
+/// 抬到最前 + 交出键盘焦点"这个系统级动画（本身就要占用主线程/合成器一小段时间）
+/// 抢得太紧——尤其是全盘扫描时进度环还在按 ~30fps request_repaint，两边的重绘
+/// 请求叠在同一小段时间窗口里，表现为"Cmd+Tab/点 Dock 切回来那一下，进度环卡顿
+/// 一下"。放宽到 60ms：多数场景（窗口只是被遮挡，`bring_to_front()` 1 帧内就
+/// 收敛）只多排一次稍晚一点的重绘，给系统那次动画让出喘息空间；真正需要跑满
+/// `ACTIVATE_FRAMES` 的少数场景（托盘唤回等）总耗时随之从 ~360ms 变成 ~720ms，
+/// 但这条路径本来就不追求"零延迟抢到焦点"，慢这一点感知不到。
+const ACTIVATE_RETRY_INTERVAL_MS: u64 = 60;
+
+/// 检测到"窗口本来可见、只是被遮挡，App 从 inactive 切回 active"这一类跃迁后，
+/// 第一次真正调用 `bring_to_front()` 之前要等待的挂钟时长。见 `defer_until`
+/// 字段注释——这个数字不是拍脑袋定的，是诊断探针实测到的系统切换动画阻塞时长
+/// （490-520ms）加了一点安全余量。托盘唤回/从最小化恢复这两条路径不受影响，
+/// 那两种场景系统完全不会自己处理，必须立刻纠正，不能等。
+#[cfg(target_os = "macos")]
+const FOCUS_REGAIN_SETTLE_MS: u64 = 650;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Page {
@@ -140,6 +163,25 @@ pub struct App {
     /// Cmd+Tab 切回本 App 时把已可见但被其它窗口遮挡的窗口提到最前。
     #[cfg(target_os = "macos")]
     macos_was_active: bool,
+    /// 在这个挂钟时刻之前，跳过本次 `activate_countdown` 的所有纠正动作
+    /// （完全不调 `bring_to_front()`）。只有 macOS 侧检测到"窗口本来可见、只是
+    /// 被遮挡，App 从 inactive 切回 active"这一类跃迁时才会设置（见 `logic()`
+    /// 用法处的注释）；非 macOS 平台永远是 `None`，字段不加 `#[cfg]` 是为了让
+    /// 下面消费它的分支不用重复写平台分支。
+    ///
+    /// 用挂钟时间而不是"推迟 1 帧"：实测过（探针日志）用帧数推迟完全没用——
+    /// 卡顿的本质是"系统自己的窗口切换动画正在播，这时候调任意一个 AppKit API
+    /// 都会同步阻塞到动画播完"，阻塞时长取决于"动画还剩多少"，跟我们推迟 1 帧
+    /// （~16-33ms）这么短完全不成比例，系统那次切换动画实测阻塞在 490-520ms 量级。
+    /// 挂钟推迟到明显盖过这个时长之后才第一次出手，届时系统动画大概率已经放完，
+    /// 我们的调用不会再撞上去。
+    defer_until: Option<std::time::Instant>,
+    /// macOS：扫描运行期间持有的"别把我 App Nap 了"令牌，见
+    /// `macos_reopen::ScanActivity`。`None` 表示当前没有扫描在跑（或不是
+    /// macOS）；扫描开始时 `Some`，扫描结束时置回 `None`（`Drop` 触发
+    /// `endActivity:`）。
+    #[cfg(target_os = "macos")]
+    scan_activity: Option<crate::macos_reopen::ScanActivity>,
 }
 
 /// 把 `icon_data::load_*_icon` 解出来的 `(rgba, w, h)` 传进 egui 的纹理系统，
@@ -189,6 +231,9 @@ impl App {
             macos_was_miniaturized: false,
             #[cfg(target_os = "macos")]
             macos_was_active: crate::macos_reopen::is_app_active(),
+            defer_until: None,
+            #[cfg(target_os = "macos")]
+            scan_activity: None,
         }
     }
 
@@ -443,8 +488,29 @@ impl eframe::App for App {
             let active = crate::macos_reopen::is_app_active();
             // 窗口已可见但被其它 App 盖住时，点 Dock / Cmd+Tab 只会激活 App、不会自动
             // 把 winit 窗口浮到最前；检测到 inactive→active 且非托盘隐藏态时主动置顶。
+            //
+            // 这类跃迁跟托盘唤回/最小化恢复不一样：那两种场景系统完全不会自己处理
+            // （Accessory→Regular 策略切换、miniaturize 状态），必须我们主动纠正；
+            // 而这里只是窗口被遮挡，macOS 自己的 Cmd+Tab/Dock 激活流程本身就在异步
+            // 把这个窗口往前抬，只是不总可靠。
+            //
+            // 诊断探针实测过：卡顿不是"我们调用太频繁/太早"，是"系统自己这次切换
+            // 动画正在播（490-520ms），这期间调任何一个 AppKit API 都会同步阻塞到
+            // 动画播完"——阻塞时长取决于动画剩余时间，跟调用次数/频率无关，之前
+            // 「提前收敛」「放宽重试间隔」「推迟 1 帧」都没用正是因为这个：1 帧
+            // （~16-33ms）远远盖不住这个几百毫秒的窗口，还是会撞上去。
+            //
+            // 所以这里换成挂钟时间推迟：`defer_until` 设到「现在 +
+            // `FOCUS_REGAIN_SETTLE_MS`」，这段时间内完全不调 `bring_to_front()`
+            // （连检查都不做），等系统那次切换动画大概率已经放完，才第一次真正
+            // 出手——这时候 AppKit 调用应该不会再撞上同步阻塞。真的没收敛（少数
+            // 场景）才从这之后开始正常走倒计时纠正，跟托盘/最小化两条路径趋同。
             if active && !self.macos_was_active && !self.window_hidden {
                 self.activate_countdown = self.activate_countdown.max(ACTIVATE_FRAMES);
+                self.defer_until = Some(
+                    std::time::Instant::now()
+                        + Duration::from_millis(FOCUS_REGAIN_SETTLE_MS),
+                );
             }
             self.macos_was_active = active;
         }
@@ -454,25 +520,30 @@ impl eframe::App for App {
         // 防御：若窗口已被隐藏（任何路径把 `window_hidden` 置 true 都应同时清零倒计数，
         // 这里再做一次兜底），绝不能继续 `bring_to_front()`——`orderFrontRegardless()`
         // 会强制把已 orderOut 的 NSWindow 重新可见，覆盖刚发出的 `Visible(false)`，
-        // 同时 `request_repaint_after(30ms)` 会因倒计数不清零而持续触发，造成闲置 CPU。
+        // 同时 `request_repaint_after` 会因倒计数不清零而持续触发，造成闲置 CPU。
         //
         // `bring_to_front()` 返回 `true` 表示这一帧发现窗口/App 状态本来就已经符合
-        // 预期、没做任何纠正动作——大多数"窗口本来就可见、只是被别的 App 遮挡后切回
-        // 前台"的场景，第一帧就会是这个结果，此时提前把倒计时清零，不必再空转到
-        // `ACTIVATE_FRAMES`：既少打若干次 `activate()`/`orderFrontRegardless()`
-        // （避免跟系统自己的应用切换动画抢主线程，参见 macos_reopen.rs 里的说明），
-        // 也少维持几十到几百毫秒的 30ms 高频重绘。真正需要多帧才能稳定置顶的场景
-        // （托盘唤回、从最小化恢复）里，只要有一帧仍在做纠正动作就会返回 `false`，
-        // 倒计时照常一帧一帧退，行为跟之前一样，不会退化。
+        // 预期、没做任何纠正动作，此时提前把倒计时清零，不必再空转到 `ACTIVATE_FRAMES`。
+        // `defer_until` 有值且还没到时，这一帧完全跳过 `bring_to_front()`（连"检查"
+        // 这一步都不做，避免哪怕是最廉价的 AppKit 调用也撞上系统动画），把第一次真正
+        // 出手推到那个挂钟时刻之后（见上面检测处的注释）。
         if self.activate_countdown > 0 {
             if !self.window_hidden {
-                if crate::macos_reopen::bring_to_front() {
+                let still_waiting = self
+                    .defer_until
+                    .is_some_and(|until| std::time::Instant::now() < until);
+                if still_waiting {
+                    // 什么都不做，等下一次 request_repaint_after 唤醒再检查一次。
+                } else if crate::macos_reopen::bring_to_front() {
                     self.activate_countdown = 0;
+                    self.defer_until = None;
                 } else {
                     self.activate_countdown -= 1;
+                    self.defer_until = None;
                 }
             } else {
                 self.activate_countdown = 0;
+                self.defer_until = None;
             }
         }
 
@@ -484,8 +555,26 @@ impl eframe::App for App {
             self.last_sample = sample;
         }
 
+        let scanning = self.core.quick.is_running() || self.core.full.is_running();
+        // macOS：扫描期间持有"别把我 App Nap 了"令牌，扫描结束（或没有扫描）就
+        // 立刻释放——不想让这段权限比实际需要的时间活得更久。见
+        // `macos_reopen::ScanActivity` 顶部注释：这是"从后台切回前台卡一下"更
+        // 可能的真正来源，跟 `activate_countdown`/`bring_to_front` 那套逻辑无关。
+        #[cfg(target_os = "macos")]
+        {
+            if scanning && self.scan_activity.is_none() {
+                self.scan_activity = Some(crate::macos_reopen::ScanActivity::begin(
+                    "CLV3000 正在扫描，需要持续绘制进度动画",
+                ));
+            } else if !scanning && self.scan_activity.is_some() {
+                self.scan_activity = None;
+            }
+        }
+
         // 重绘策略：尽量事件驱动，绝不让事件循环空转——这是老机器上常驻 CPU 的关键。
-        // - 正在「置顶唤回」：30ms 短间隔快速收敛（原有行为，仅十几帧）。
+        // - 正在「置顶唤回」：`ACTIVATE_RETRY_INTERVAL_MS` 间隔快速收敛（多数场景
+        //   1 帧内就靠 `bring_to_front()` 的提前收敛结束，只有少数场景才会跑满
+        //   `ACTIVATE_FRAMES`）。
         // - 有扫描在跑：扫描页自己按 ~30fps 刷新（见 scan_page / progress_ring）；
         //   这里只留一个低频兜底（可见 250ms / 托盘 500ms），保证用户停在其它页面、
         //   或窗口隐藏时，扫描事件仍能被排空、结果被记录。
@@ -494,8 +583,8 @@ impl eframe::App for App {
         //   Toast 有自己的短时定时器，键盘/鼠标输入本身就会触发重绘。
         let visible = ctx.input(|i| i.viewport().visible().unwrap_or(true));
         if self.activate_countdown > 0 {
-            ctx.request_repaint_after(Duration::from_millis(30));
-        } else if self.core.quick.is_running() || self.core.full.is_running() {
+            ctx.request_repaint_after(Duration::from_millis(ACTIVATE_RETRY_INTERVAL_MS));
+        } else if scanning {
             ctx.request_repaint_after(Duration::from_millis(if visible { 250 } else { 500 }));
         }
     }

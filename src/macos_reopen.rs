@@ -103,13 +103,14 @@ mod imp {
         let app = NSApplication::sharedApplication(mtm);
         let mut converged = true;
         // 只在真正不是前台 App 时才调 `activate()`：这个调用会让 WindowServer
-        // 走一遍完整的应用切换流程，而 macOS 自己的"切换到本 App"动画本身就要
-        // 跑 ~300-400ms（`ACTIVATE_FRAMES=12` 帧 * 30ms ≈ 360ms 正是这个倒计时
-        // 窗口这么设的原因）——`activate_countdown` 期间每帧都无条件重复调
-        // `activate()`，会在系统自己的切换动画还没播完时，在主线程上又叠一次完整
-        // 的激活流程，跟 WindowServer 的合成/动画抢主线程时间片，表现为"全盘扫描
-        // 时从后台切到前台，进度环动画在切换那几百毫秒里明显卡顿，但窗口一直在
-        // 前台/后台稳定态时都很流畅"。已经 active 时跳过。
+        // 走一遍完整的应用切换流程，而 macOS 自己的"切换到本 App"动画（点 Dock /
+        // Cmd+Tab 都会触发，不管走哪条路径）本身就要跑 ~300-400ms——`activate()`
+        // 恰好和这段系统动画撞在同一帧，会在主线程上叠一次完整的激活流程，跟
+        // WindowServer 的合成/动画抢主线程时间片，表现为"全盘扫描时从后台切到
+        // 前台，进度环动画在切换那一下明显卡顿，但窗口一直在前台/后台稳定态时
+        // 都很流畅"。已经 active 时跳过；调用方（`app/mod.rs` 的
+        // `ACTIVATE_RETRY_INTERVAL_MS`）也把两次重试之间的间隔放宽了，减少
+        // 我们自己的重绘请求跟这段系统动画抢主线程的机会。
         if !app.isActive() {
             app.activate();
             converged = false;
@@ -136,6 +137,48 @@ mod imp {
     /// wakeup 线程不是主线程，所以这里 no-op。macOS 的唤回完全由主线程的
     /// `bring_to_front` + `activate_countdown` 机制处理。
     pub fn set_foreground() {}
+
+    /// 扫描期间持有的"别把我 App Nap 了"令牌。
+    ///
+    /// macOS 会对窗口被遮挡/App 非前台活跃的进程做 App Nap 节流（降低 CPU/GPU
+    /// 调度优先级、暂停 display link 等省电手段）。扫描本身是用户主动发起、需要
+    /// 持续绘制进度动画的前台工作，被节流之后，一旦窗口重新变成前台活跃，系统要
+    /// 把这些调度状态恢复回正常档位——这个"唤醒"过程实测量级在几百毫秒，且完全
+    /// 发生在系统调度层面，跟 `bring_to_front`/`activate_countdown` 那套窗口置顶
+    /// 逻辑无关（那套逻辑的单次调用正常应在几毫秒以内）。这正是"全盘扫描时从后台
+    /// 切回前台，进度环卡一下"的更可能来源：持续调过 `activate()`/
+    /// `orderFrontRegardless()` 的时序、重试间隔都没能消除这一下卡顿，说明卡的
+    /// 不是这几个调用本身。
+    ///
+    /// `NSProcessInfo::beginActivityWithOptions(_:reason:)` + `NSActivityUserInitiated`
+    /// 是 Apple 官方文档给"用户发起、不允许因省电被节流"这类工作推荐的标准做法：
+    /// 持有期间系统不会把本进程判定为可以 App Nap 的候选，`endActivity:`（这里
+    /// 由 `Drop` 触发）之后节流策略才重新生效。
+    pub struct ScanActivity(objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2::runtime::NSObjectProtocol>>);
+
+    impl ScanActivity {
+        /// 扫描开始时调用一次，返回值要一直存活到扫描结束（存进调用方的字段里，
+        /// 扫描结束时 drop 掉即可，见 `app/mod.rs` 的用法）。
+        pub fn begin(reason: &str) -> Self {
+            let info = objc2_foundation::NSProcessInfo::processInfo();
+            let reason = objc2_foundation::NSString::from_str(reason);
+            let token = info.beginActivityWithOptions_reason(
+                objc2_foundation::NSActivityOptions::UserInitiated,
+                &reason,
+            );
+            Self(token)
+        }
+    }
+
+    impl Drop for ScanActivity {
+        fn drop(&mut self) {
+            // `endActivity:` 的 unsafe 要求只是"`activity` 必须是正确类型"——这里
+            // 的 `self.0` 就是 `begin` 时 `beginActivityWithOptions_reason` 亲手
+            // 返回的那个 token，类型上不可能对不上。
+            let info = objc2_foundation::NSProcessInfo::processInfo();
+            unsafe { info.endActivity(&self.0) };
+        }
+    }
 }
 
 /// Windows：把本进程的可见顶层窗口拉到前台。
