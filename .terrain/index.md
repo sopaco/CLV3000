@@ -43,6 +43,7 @@ source: .
     - .gitignore
   - src/
     - icons.rs
+    - app/
     - config.rs
     - icon_data.rs
     - sysmon.rs
@@ -57,6 +58,5 @@ source: .
     - localtime.rs
     - main.rs
     - lifecycle.rs
-    - app.rs
     - widgets.rs
     - single_instance.rs
