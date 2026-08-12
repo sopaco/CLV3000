@@ -77,11 +77,9 @@ struct PathStamp {
 /// `ScanCache` 在某一时刻的不可变只读快照——`snapshot()` 拷贝出当时的两张表
 /// （不含 `last_used`，只读路径不需要它）。多个线程可以各自持有 `&CacheSnapshot`
 /// 并发读取，不需要任何锁：这是并行预筛（`engine.rs` 的 `prescan`）刻意选择的
-/// 设计，用来彻底避开一个真实踩过的坑——早期实现让多个 worker 线程共享
-/// `Mutex<ScanCache>`、每个文件上锁 2~4 次，在这台 macOS 开发机上用 6 个
-/// worker 线程实测直接卡死（`sample` 抓到全部 worker 都停在
-/// `pthread_mutex_firstfit_lock_wait`，没有任何线程在推进——推测是高频次、
-/// 短临界区、强竞争场景下触发了 pthread mutex 的优先级反转）。
+/// 设计，用来彻底避开一个真实踩过的死锁（细粒度锁共享 `Mutex<ScanCache>`，6
+/// worker 实测卡死在 `pthread_mutex_firstfit_lock_wait`）——完整事故记录见
+/// `clv3000-scan-engine-pitfalls` skill，不要再引入跨 worker 共享的可变锁缓存。
 ///
 /// 因此这里不共享任何可变状态：每个 worker 只读 `&CacheSnapshot`（`lookup`/
 /// `quick_hash` 的判定逻辑跟 `ScanCache` 完全一致，只是不刷新 `last_used`——
@@ -466,7 +464,7 @@ pub fn mtime_ns(meta: &std::fs::Metadata) -> i128 {
 /// 算病毒库目录的版本号：目录里每个 .cvd/.cld/.cud 的"文件名:大小:修改时间"排序后
 /// 拼起来再 BLAKE3。任一库文件更新（freshclam）→ 版本号变 → 旧缓存条目自动失效。
 ///
-/// 必须把 `.cud`（增量/自定义签名库）也纳入——`app.rs` 里 `database_signature`
+/// 必须把 `.cud`（增量/自定义签名库）也纳入——`src/app/freshclam.rs` 里 `database_signature`
 /// 判断"freshclam 是否真的更新了库"时看的是 `.cvd/.cld/.cud` 三种后缀，这里如果
 /// 只看两种，一次只更新了 `.cud` 的增量更新就不会改变这里算出的版本号，旧缓存
 /// 条目（可能判定为"clean"）会继续被复用到 TTL 到期，新签名扫不出旧文件——两处

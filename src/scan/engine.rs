@@ -44,7 +44,7 @@ mod real {
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
-    /// 预筛结束后交给后台线程执行的 clamscan 批次。
+    /// 预筛结束后、在当前（已由调用者放到后台的）线程上同步执行的 clamscan 批次。
     struct ClamscanWork {
         to_scan: Vec<PathBuf>,
         hash_by_path: HashMap<String, String>,
@@ -52,7 +52,7 @@ mod real {
         scanned: usize,
     }
 
-    /// 后台线程返回值（`run_clamscan_batch` 始终返回 `Some`）。
+    /// `run_clamscan_batch` 的返回值：本批扫描数、更新后的缓存、可选的 stderr 输出。
     type ClamscanOutcome = (usize, cache::ScanCache, Option<String>);
 
     // `creation_flags` 只在 Windows 上有意义；非 Windows 构建不需要这个 trait，门控掉避免 unused import。
@@ -359,14 +359,10 @@ mod real {
     /// 新学到的记录本地攢成 `Vec<CacheWrite>` 随结果一起返回，全部 worker join
     /// 完之后单线程把它们应用到真正的 `cache`。
     ///
-    /// 早期实现是反过来的——多个 worker 直接共享一个 `Mutex<ScanCache>`，
-    /// 每个文件上锁 2~4 次——这台 macOS 开发机上用 6 个 worker 线程实测直接
-    /// 卡死不动（`sample` 抓到全部 worker 都停在
-    /// `pthread_mutex_firstfit_lock_wait`，没有任何线程在推进，怀疑是这种高频
-    /// 次、短临界区、强竞争场景触发了 pthread mutex 的优先级反转）。现在这个
-    /// "只读快照 + 本地攢写入 + 单线程合并"的模型从设计上完全不存在共享可变
-    /// 状态，也就不存在这类问题——如果以后要改这段代码，**不要**再引入跨
-    /// worker 共享的锁保护缓存，宁可多付一次快照拷贝的成本。
+    /// 这个设计是为了绕开一次真实死锁（早期版本细粒度锁共享 `ScanCache`，6
+    /// worker 实测卡死）——完整事故记录见 `CacheSnapshot` 的文档注释和
+    /// `clv3000-scan-engine-pitfalls` skill。**不要**再引入跨 worker 共享的锁
+    /// 保护缓存，宁可多付一次快照拷贝的成本。
     fn prescan(
         paths: &[PathBuf],
         tx: &Sender<ScanEvent>,
@@ -639,7 +635,7 @@ mod real {
     /// 速度优化相关的扫描开关。跳过与可执行文件无关的格式，并对 PE 解析按平台微调。
     fn apply_scan_flags(cmd: &mut Command) {
         // 关闭 bytecode（单文件耗时杀手：JIT 编译+模拟执行，最多 5s）与 PUA 签名匹配。
-        cmd.arg("--scan-elf=no") // 不扫 ELF（macOS/Linux 可执行文件由各自解析器处理）
+        cmd.arg("--scan-elf=no") // 不扫 ELF：这里只处理 Windows/macOS，PE/Mach-O 由各自解析器处理，与 ELF 无关
             .arg("--scan-archive=no") // 目标是独立可执行文件，非自解压包
             .arg("--scan-mail=no")
             .arg("--scan-pdf=no")

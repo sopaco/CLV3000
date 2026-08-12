@@ -30,8 +30,8 @@ pub struct SysMonHandle {
 
 impl Drop for SysMonHandle {
     fn drop(&mut self) {
-        // 置位停止标记并唤醒后台线程，让它立刻从 park_timeout 返回并退出，
-        // 不必空转等到下一次采样周期结束。
+        // 置位停止标记并 notify_one 唤醒后台线程，让它立刻从 Condvar::wait_timeout
+        // 返回并退出，不必空转等到下一次采样周期结束。
         let (lock, cvar) = &*self.stop;
         *lock.lock().unwrap() = true;
         cvar.notify_one();
@@ -61,7 +61,7 @@ pub fn spawn(ctx: egui::Context) -> SysMonHandle {
         let mut smoothed_mem: Option<f64> = None;
 
         loop {
-            // 等待停止标记或 1 秒到期——用条件变量 + park_timeout 替代原先的
+            // 等待停止标记或 1 秒到期——用条件变量 `Condvar::wait_timeout` 替代原先的
             // 10×100ms 自旋轮询：平时线程真正睡死、零 CPU；关闭时由 Drop 的
             // notify_one 立刻唤醒，几乎无延迟退出。
             {

@@ -312,7 +312,7 @@ impl VirusDbState {
     /// `ctx` 用于查询完成时唤醒 UI（闲置时 UI 没有定时心跳，不唤醒结果就一直没人收）。
     pub(crate) fn refresh_db_version(&mut self, ctx: egui::Context) {
         if self.version_rx.is_some() {
-            return; // 已有查询在飞，不重复发起
+            return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
         self.version_rx = Some(rx);

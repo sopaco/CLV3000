@@ -68,7 +68,9 @@ pub fn clamscan_path() -> PathBuf {
         if bundled.is_file() {
             return bundled;
         }
-        // 系统安装位置（手动装到 /usr/local/clamav，或 Homebrew 的等价前缀）：
+        // 系统安装位置：手动 `./configure --prefix=/usr/local/clamav` 编译安装的经典布局
+        // （注意不是 Homebrew 的布局——Homebrew 把 clamscan 直接放进其 PATH 前缀里，
+        // 走下面 `PathBuf::from("clamscan")` 的 PATH 兜底命中，不会经过这一步）。
         // 识别到就直接返回绝对路径，这样 App 不依赖用户把 bin 加进 PATH。
         let system = PathBuf::from("/usr/local/clamav/bin/clamscan");
         if system.is_file() {

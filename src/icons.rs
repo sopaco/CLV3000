@@ -113,7 +113,6 @@ pub fn warning_triangle(painter: &Painter, rect: Rect, stroke: Stroke, fill: Opt
     }
     painter.add(polyline(&pts, stroke, true));
 
-    // 感叹号：一条竖线 + 一个点。
     let top = map(rect, 0.5, 0.38);
     let bottom = map(rect, 0.5, 0.62);
     painter.line_segment([top, bottom], stroke);
@@ -157,7 +156,6 @@ pub fn database(painter: &Painter, rect: Rect, stroke: Stroke) {
     let top_center = Pos2::new(cx, top_y);
     let bottom_center = Pos2::new(cx, bottom_y);
 
-    // 顶部整圈椭圆。
     painter.add(Shape::closed_line(
         ellipse_points(top_center, rx, ry, 24),
         stroke,
@@ -169,13 +167,11 @@ pub fn database(painter: &Painter, rect: Rect, stroke: Stroke) {
         .filter(|p| p.y >= mid_center.y)
         .collect();
     painter.add(polyline(&mid_arc, stroke, false));
-    // 底部半圈弧线（只画看得到的下半部分）。
     let bottom_arc: Vec<Pos2> = ellipse_points(bottom_center, rx, ry, 24)
         .into_iter()
         .filter(|p| p.y >= bottom_center.y)
         .collect();
     painter.add(polyline(&bottom_arc, stroke, false));
-    // 两侧竖线，连接顶部椭圆和底部弧线。
     painter.line_segment(
         [
             Pos2::new(cx - rx, top_y),

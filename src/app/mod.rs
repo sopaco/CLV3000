@@ -256,7 +256,7 @@ impl App {
         // 若拖到下一帧 reconcile 发，则下一帧 `ui()` 会在仍可见的窗口上因 `window_hidden`
         // 早退、画一帧纯背景色，用户就看到"关闭时闪一下"。立即发则 winit 在本帧结束就
         // 藏窗口，下一帧 `ui()` 跑在已隐藏窗口上，无可见闪烁。同时清零 `activate_countdown`，
-        // 避免隐藏后倒计数继续 `orderFrontRegardless` 把窗口又拉可见（见 skill 第 7 节）。
+        // 避免隐藏后倒计数继续 `orderFrontRegardless` 把窗口又拉可见（见 clv3000-platform-pitfalls）。
         // Accessory 策略由 reconcile 的"已隐藏"分支下一帧补上（窗口已藏，1 帧延迟无碍）。
         ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         self.window_hidden = true;

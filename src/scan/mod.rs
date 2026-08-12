@@ -1,5 +1,9 @@
 //! 扫描相关的共享类型：闪电扫描 (quick_scan) 和全盘扫描 (full_scan) 都会产出这些事件，
 //! 由 engine.rs 负责真正调用 clamscan 子进程，quick_scan/full_scan 负责"喂路径"并附加各自的统计信息。
+//!
+//! 约定：`engine::run`、`full_scan::run`、`quick_scan::run` 都是阻塞函数，调用者需要
+//! 自己在后台线程里跑它们——三处的 `pub fn run` 各自重复了这句提示，是故意的：
+//! 每个调用点独立提醒，比只在这里写一遍、要求读者记住并跨文件回溯更不容易被忽略。
 
 // authenticode 预筛在 Windows（WinVerifyTrust）与 macOS（codesign）上都有真实实现，
 // 由文件级 `#![cfg(any(windows, target_os = "macos"))]` 控制编译；Linux 等其它目标

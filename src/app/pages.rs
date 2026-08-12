@@ -471,9 +471,9 @@ fn scan_page(
                 if ui.link("Cancel Scan").clicked() {
                     state.request_cancel();
                 }
-                // 旋转环靠 time 推进、已用时长每秒变化、事件限流后还有积压要继续排空——
-                // 三者都需要持续重绘，否则一停下来界面就静止了。限制在 ~30fps：动画
-                // 仍然流畅，但不会在老机器上按 vsync 满帧率白烧 CPU/GPU。
+                // 旋转环靠 time 推进、已用时长每秒变化——两者都需要持续重绘，否则一
+                // 停下来界面就静止了。限制在 ~30fps：动画仍然流畅，但不会在老机器上
+                // 按 vsync 满帧率白烧 CPU/GPU。
                 ui.ctx().request_repaint_after(Duration::from_millis(33));
             }
             ScanPhase::Done {
