@@ -2,14 +2,6 @@
 //! 纹理资源管理，并把实际渲染分派给 `pages`（四个页面）与 `chrome`（标题栏/
 //! 侧边栏/资源条）。业务状态（配置、扫描、病毒库）在 `core::AppCore`，
 //! freshclam 子进程调用在 `freshclam`，跟渲染无关的小工具在 `util`。
-//!
-//! `App` 直接 own `AppCore` 和 `Lifecycle`（不再是 `Rc<RefCell<_>>`）：
-//! `main.rs` 里 `eframe::run_native` 现在只调用一次、贯穿整个进程生命周期，
-//! 会话不会被销毁重建，也就不存在"状态要跨会话共享"这个当初引入
-//! `Rc<RefCell<>>` 的理由。直接 own 之后，原来散落各处、专门绕开
-//! "already borrowed" 运行时 panic 的写法（比如把好几步拆成独立小块、
-//! 用完立刻 `drop`）全部不再需要——普通的 `&mut self` 字段访问，编译期就把
-//! 别名冲突挡住了，出错也是编译错误而不是运行时 panic。
 
 mod chrome;
 mod core;
@@ -30,9 +22,10 @@ use tray_icon::TrayIconEvent;
 
 /// 主窗口默认尺寸（与 `main.rs` 里 `with_inner_size` 一致）。
 const MAIN_WINDOW_SIZE: [f32; 2] = [900.0, 600.0];
-/// 「关于」独占窗口尺寸：比主窗口小一圈，避免关于页背后留一大片黑底（见
-/// `about_dialog::paint_about_fullscreen`）。注意要 ≥ `main.rs` 里的 `min_inner_size`。
-const ABOUT_WINDOW_SIZE: [f32; 2] = [480.0, 460.0];
+#[cfg(not(windows))]
+const ABOUT_WINDOW_SIZE: [f32; 2] = [480.0, 472.0];
+#[cfg(windows)]
+const ABOUT_WINDOW_SIZE: [f32; 2] = [480.0, 428.0];
 
 /// 从托盘唤回窗口后的「置顶倒计时」帧数。macOS 14+ 下单次 `activate()` 抢不到
 /// 焦点，需要连续若干帧 `orderFrontRegardless` 才稳定。Windows
@@ -43,30 +36,17 @@ const ABOUT_WINDOW_SIZE: [f32; 2] = [480.0, 460.0];
 ///
 /// 这是"最多重试几次"的上限，不是"每次都会跑满"——`bring_to_front()` 一旦发现
 /// App/窗口状态已经符合预期就会提前收敛（见 `logic()` 里 `activate_countdown` 的
-/// 使用处），多数场景（窗口只是被遮挡、非最小化/托盘）1 帧内就结束，这个上限只
-/// 兜底真正需要多帧才能稳定下来的场景（托盘唤回、从最小化恢复）。
+/// 使用处），这个上限只兜底真正需要多帧才能稳定下来的场景（托盘唤回、从最小化
+/// 恢复——这两种场景系统确定不会自己处理好，必须我们主动纠正）。
 #[cfg(target_os = "macos")]
 const ACTIVATE_FRAMES: u8 = 12;
 #[cfg(not(target_os = "macos"))]
 const ACTIVATE_FRAMES: u8 = 2;
 
-/// 「置顶倒计时」期间两次重试之间的间隔。之前固定 30ms，跟 macOS 自己"把窗口
-/// 抬到最前 + 交出键盘焦点"这个系统级动画（本身就要占用主线程/合成器一小段时间）
-/// 抢得太紧——尤其是全盘扫描时进度环还在按 ~30fps request_repaint，两边的重绘
-/// 请求叠在同一小段时间窗口里，表现为"Cmd+Tab/点 Dock 切回来那一下，进度环卡顿
-/// 一下"。放宽到 60ms：多数场景（窗口只是被遮挡，`bring_to_front()` 1 帧内就
-/// 收敛）只多排一次稍晚一点的重绘，给系统那次动画让出喘息空间；真正需要跑满
-/// `ACTIVATE_FRAMES` 的少数场景（托盘唤回等）总耗时随之从 ~360ms 变成 ~720ms，
-/// 但这条路径本来就不追求"零延迟抢到焦点"，慢这一点感知不到。
+/// 「置顶倒计时」期间两次重试之间的间隔。托盘唤回/最小化恢复这两条路径用，
+/// macOS 上单次 `activate()`/`orderFrontRegardless()` 不一定一次就稳，隔一小段
+/// 时间再检查一次更保险。
 const ACTIVATE_RETRY_INTERVAL_MS: u64 = 60;
-
-/// 检测到"窗口本来可见、只是被遮挡，App 从 inactive 切回 active"这一类跃迁后，
-/// 第一次真正调用 `bring_to_front()` 之前要等待的挂钟时长。见 `defer_until`
-/// 字段注释——这个数字不是拍脑袋定的，是诊断探针实测到的系统切换动画阻塞时长
-/// （490-520ms）加了一点安全余量。托盘唤回/从最小化恢复这两条路径不受影响，
-/// 那两种场景系统完全不会自己处理，必须立刻纠正，不能等。
-#[cfg(target_os = "macos")]
-const FOCUS_REGAIN_SETTLE_MS: u64 = 650;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Page {
@@ -159,23 +139,6 @@ pub struct App {
     /// （原生已 deminiaturize 但 egui 仍标记 minimized）。
     #[cfg(target_os = "macos")]
     macos_was_miniaturized: bool,
-    /// macOS：上一帧 `NSApplication::isActive` 是否为 true。用于检测 Dock 点击 /
-    /// Cmd+Tab 切回本 App 时把已可见但被其它窗口遮挡的窗口提到最前。
-    #[cfg(target_os = "macos")]
-    macos_was_active: bool,
-    /// 在这个挂钟时刻之前，跳过本次 `activate_countdown` 的所有纠正动作
-    /// （完全不调 `bring_to_front()`）。只有 macOS 侧检测到"窗口本来可见、只是
-    /// 被遮挡，App 从 inactive 切回 active"这一类跃迁时才会设置（见 `logic()`
-    /// 用法处的注释）；非 macOS 平台永远是 `None`，字段不加 `#[cfg]` 是为了让
-    /// 下面消费它的分支不用重复写平台分支。
-    ///
-    /// 用挂钟时间而不是"推迟 1 帧"：实测过（探针日志）用帧数推迟完全没用——
-    /// 卡顿的本质是"系统自己的窗口切换动画正在播，这时候调任意一个 AppKit API
-    /// 都会同步阻塞到动画播完"，阻塞时长取决于"动画还剩多少"，跟我们推迟 1 帧
-    /// （~16-33ms）这么短完全不成比例，系统那次切换动画实测阻塞在 490-520ms 量级。
-    /// 挂钟推迟到明显盖过这个时长之后才第一次出手，届时系统动画大概率已经放完，
-    /// 我们的调用不会再撞上去。
-    defer_until: Option<std::time::Instant>,
     /// macOS：扫描运行期间持有的"别把我 App Nap 了"令牌，见
     /// `macos_reopen::ScanActivity`。`None` 表示当前没有扫描在跑（或不是
     /// macOS）；扫描开始时 `Some`，扫描结束时置回 `None`（`Drop` 触发
@@ -229,9 +192,6 @@ impl App {
             size_intent: 0,
             #[cfg(target_os = "macos")]
             macos_was_miniaturized: false,
-            #[cfg(target_os = "macos")]
-            macos_was_active: crate::macos_reopen::is_app_active(),
-            defer_until: None,
             #[cfg(target_os = "macos")]
             scan_activity: None,
         }
@@ -309,7 +269,9 @@ impl App {
     }
 
     fn poll_tray(&mut self) {
-        let Some(tray) = self.tray.as_ref() else { return };
+        let Some(tray) = self.tray.as_ref() else {
+            return;
+        };
         let tray_focus = poll_tray_events(tray, &mut self.core, &mut self.lifecycle);
         let next_mode = self.lifecycle.mode;
 
@@ -374,11 +336,6 @@ impl App {
             // 统一居中：窗口刚从隐藏显示（"打开"），或尺寸意图变化（主窗↔关于窗切换）
             // 时，都把窗口挪到所在显示器正中央。两类触发都是边沿条件，用户拖动后停留
             // 在同尺寸窗口/同一可见周期内不会被反复拽回中心。
-            //
-            // 之前只在「关于打开」(intent==1) 时居中，导致"从托盘开关于→关关于→再开
-            // 主窗"时主窗只收到 `InnerSize` 不收 `OuterPosition`，于是继承了关于窗
-            // （更小、已居中）的左上角，更大的主窗看上去就偏到屏幕右下角——即用户
-            // 报告的"主窗口位置偏了、对齐了前一个关于窗口的左上角"现象。
             if just_shown || intent_changed {
                 let size = if intent == 1 {
                     ABOUT_WINDOW_SIZE
@@ -397,12 +354,6 @@ impl App {
             // 进托盘态：先把视口藏起来，再切到 Accessory（离开 Dock）。
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
             self.window_hidden = true;
-            // 必须同步清零「置顶唤回」倒计数——否则接下来若干帧 `bring_to_front()`
-            // 会调 `NSWindow::orderFrontRegardless()`，该方法无视 winit 刚发出的
-            // `Visible(false)`（即 `orderOut:`），把已隐藏的窗口再次强制可见并置顶；
-            // 而 `ui()` 又因 `window_hidden && !about_open` 整帧跳过不画内容，
-            // 用户就会在关闭窗口后看到一张与窗口同尺寸的纯黑空背景短暂闪现
-            // （"关掉又冒出黑底"现象的根因）。
             self.activate_countdown = 0;
             #[cfg(target_os = "macos")]
             crate::macos_reopen::set_accessory(true);
@@ -421,13 +372,6 @@ impl App {
     }
 
     /// macOS：把 egui 里陈旧的 `minimized` 标记与 `NSWindow` 真实状态对齐。
-    ///
-    /// 用户点标题栏最小化后从 Dock 恢复时，原生窗口已 deminiaturize，但 egui-winit
-    /// 不会在运行时刷新 minimized（防死锁），`ui()` 会被跳过。仅在检测到「上一帧已
-    /// miniaturize、本帧已 deminiaturize、但 egui 仍标记 minimized」时补发
-    /// `Minimized(false)`——避免在最小化动画尚未完成时误把最小化指令抵消。
-    ///
-    /// 返回 `true` 表示刚完成「从最小化恢复」的对齐（可顺带触发置顶唤回）。
     #[cfg(target_os = "macos")]
     fn sync_macos_minimized_viewport(&mut self, ctx: &egui::Context) -> bool {
         if self.window_hidden {
@@ -456,13 +400,7 @@ impl Drop for App {
 
 impl eframe::App for App {
     /// eframe 默认 `clear_color` 是近黑、半透明的 `(12,12,12,180)`（为"窗口阴影在
-    /// 浅色系统主题下不显得怪"设计），本项目从不需要透明窗口。只要有一帧内容没有
-    /// 铺满整个视口——比如「关于」独占窗口关闭时 `reconcile_lifecycle` 发出的原生
-    /// `InnerSize` 尺寸跳变（新增区域要等下一帧才补画主界面）、或托盘隐藏/唤回时
-    /// `Visible` 指令与实际渲染之间那几帧竞态窗口——GPU 露出来的就是这个 clear
-    /// color，肉眼看就是"关闭时黑一下"。显式覆盖成本项目自己的不透明背景
-    /// `colors::BG_APP` 后，即使真的撞上这类未铺满的空档帧，露出来的颜色也跟正常
-    /// 页面背景完全一致，视觉上不会显得"跳"了一下。
+    /// 浅色系统主题下不显得怪"设计）
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         colors::BG_APP.to_normalized_gamma_f32()
     }
@@ -470,11 +408,6 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_tray();
 
-        // 「关于」关闭信号 ABOUT_CLOSED 改在 ui() 阶段消费（paint_about_fullscreen 之后
-        // 当场调 hide_to_tray 藏窗口），不在 logic 里消费。logic 在 ui 之前跑，若在这里
-        // 消费会让 reconcile 当帧发 Visible(false)，紧接着 ui() 在仍可见窗口上早退画一帧
-        // 纯背景色 → "关闭时闪一下"。ui 阶段消费则 winit 在该帧结束就藏窗口，下一帧
-        // ui() 跑在已隐藏窗口上，无可见闪烁。详见 ui() 里 paint_about_fullscreen 之后。
         self.reconcile_lifecycle(ctx);
 
         #[cfg(target_os = "macos")]
@@ -483,67 +416,16 @@ impl eframe::App for App {
             self.activate_countdown = self.activate_countdown.max(ACTIVATE_FRAMES);
         }
 
-        #[cfg(target_os = "macos")]
-        {
-            let active = crate::macos_reopen::is_app_active();
-            // 窗口已可见但被其它 App 盖住时，点 Dock / Cmd+Tab 只会激活 App、不会自动
-            // 把 winit 窗口浮到最前；检测到 inactive→active 且非托盘隐藏态时主动置顶。
-            //
-            // 这类跃迁跟托盘唤回/最小化恢复不一样：那两种场景系统完全不会自己处理
-            // （Accessory→Regular 策略切换、miniaturize 状态），必须我们主动纠正；
-            // 而这里只是窗口被遮挡，macOS 自己的 Cmd+Tab/Dock 激活流程本身就在异步
-            // 把这个窗口往前抬，只是不总可靠。
-            //
-            // 诊断探针实测过：卡顿不是"我们调用太频繁/太早"，是"系统自己这次切换
-            // 动画正在播（490-520ms），这期间调任何一个 AppKit API 都会同步阻塞到
-            // 动画播完"——阻塞时长取决于动画剩余时间，跟调用次数/频率无关，之前
-            // 「提前收敛」「放宽重试间隔」「推迟 1 帧」都没用正是因为这个：1 帧
-            // （~16-33ms）远远盖不住这个几百毫秒的窗口，还是会撞上去。
-            //
-            // 所以这里换成挂钟时间推迟：`defer_until` 设到「现在 +
-            // `FOCUS_REGAIN_SETTLE_MS`」，这段时间内完全不调 `bring_to_front()`
-            // （连检查都不做），等系统那次切换动画大概率已经放完，才第一次真正
-            // 出手——这时候 AppKit 调用应该不会再撞上同步阻塞。真的没收敛（少数
-            // 场景）才从这之后开始正常走倒计时纠正，跟托盘/最小化两条路径趋同。
-            if active && !self.macos_was_active && !self.window_hidden {
-                self.activate_countdown = self.activate_countdown.max(ACTIVATE_FRAMES);
-                self.defer_until = Some(
-                    std::time::Instant::now()
-                        + Duration::from_millis(FOCUS_REGAIN_SETTLE_MS),
-                );
-            }
-            self.macos_was_active = active;
-        }
-
         // 从托盘唤回后的几帧内，反复把窗口提到最前（见 macos_reopen::bring_to_front）。
-        // macOS 14+ 下单次 activate 抢不到焦点，必须连续几帧 orderFrontRegardless 才稳。
-        // 防御：若窗口已被隐藏（任何路径把 `window_hidden` 置 true 都应同时清零倒计数，
-        // 这里再做一次兜底），绝不能继续 `bring_to_front()`——`orderFrontRegardless()`
-        // 会强制把已 orderOut 的 NSWindow 重新可见，覆盖刚发出的 `Visible(false)`，
-        // 同时 `request_repaint_after` 会因倒计数不清零而持续触发，造成闲置 CPU。
-        //
-        // `bring_to_front()` 返回 `true` 表示这一帧发现窗口/App 状态本来就已经符合
-        // 预期、没做任何纠正动作，此时提前把倒计时清零，不必再空转到 `ACTIVATE_FRAMES`。
-        // `defer_until` 有值且还没到时，这一帧完全跳过 `bring_to_front()`（连"检查"
-        // 这一步都不做，避免哪怕是最廉价的 AppKit 调用也撞上系统动画），把第一次真正
-        // 出手推到那个挂钟时刻之后（见上面检测处的注释）。
         if self.activate_countdown > 0 {
             if !self.window_hidden {
-                let still_waiting = self
-                    .defer_until
-                    .is_some_and(|until| std::time::Instant::now() < until);
-                if still_waiting {
-                    // 什么都不做，等下一次 request_repaint_after 唤醒再检查一次。
-                } else if crate::macos_reopen::bring_to_front() {
+                if crate::macos_reopen::bring_to_front() {
                     self.activate_countdown = 0;
-                    self.defer_until = None;
                 } else {
                     self.activate_countdown -= 1;
-                    self.defer_until = None;
                 }
             } else {
                 self.activate_countdown = 0;
-                self.defer_until = None;
             }
         }
 
@@ -556,10 +438,6 @@ impl eframe::App for App {
         }
 
         let scanning = self.core.quick.is_running() || self.core.full.is_running();
-        // macOS：扫描期间持有"别把我 App Nap 了"令牌，扫描结束（或没有扫描）就
-        // 立刻释放——不想让这段权限比实际需要的时间活得更久。见
-        // `macos_reopen::ScanActivity` 顶部注释：这是"从后台切回前台卡一下"更
-        // 可能的真正来源，跟 `activate_countdown`/`bring_to_front` 那套逻辑无关。
         #[cfg(target_os = "macos")]
         {
             if scanning && self.scan_activity.is_none() {
@@ -592,10 +470,6 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        // 关闭按钮：关于打开时只关关于层（绝不连带关主窗口）；否则（且非真正退出）
-        // 最小化到托盘。真正退出（Quit 模式）时不发 CancelClose——让 winit 的 Close
-        // 真正生效，否则 CancelClose 会把 reconcile_lifecycle 发出的 Close 撤掉，程序
-        // 永远退不出去。
         if ctx.input(|i| i.viewport().close_requested()) {
             let is_quit = self.lifecycle.mode == RunMode::Quit || self.allow_exit;
             if is_quit {
@@ -631,15 +505,6 @@ impl eframe::App for App {
         // 看起来就是一张独立的关于窗口。关闭后由 reconcile 自动缩回托盘，不会残留主窗口。
         if about_open && about_standalone {
             crate::about_dialog::paint_about_fullscreen(ui);
-            // 在 ui 阶段消费关闭信号（OK / Esc / 标题关闭按钮都在 paint_about_fullscreen
-            // 内置位 ABOUT_CLOSED），并当场藏窗口。关于关闭的两类问题都靠这一处：
-            // - 之前若在 logic 消费（take_closed 在 reconcile 前）→ reconcile 当帧发
-            //   Visible(false)，但 ui() 紧跟其后在仍可见窗口上早退画一帧纯背景色
-            //   → "关闭时闪一下"。
-            // - 更早若在 logic 的 reconcile 之后消费 → reconcile 看到 about_open=true
-            //   不发 Visible(false)，ui() 接着把主界面画进仍可见的关于窗 → "闪现主窗内容"。
-            // 改在 ui 阶段（paint_about 之后）消费 + 立即 hide_to_tray，winit 本帧结束
-            // 就藏窗口，下一帧 ui() 跑在已隐藏窗口上，既无纯背景闪、也无主窗内容闪。
             if crate::about_dialog::take_closed() {
                 let mode = self.lifecycle.mode;
                 self.lifecycle.about_open = false;
@@ -682,14 +547,6 @@ impl eframe::App for App {
             .frame(egui::Frame::default().fill(colors::BG_SIDEBAR))
             .show(ui, |ui| chrome::sidebar(ui, &ctx, self));
 
-        // 克隆纹理句柄（内部是 Arc，克隆很轻）出来，避免闭包里既要不可变借用
-        // `self.dotted_bg_texture` 画背景、又要可变借用 `self` 传给各页面渲染函数。
-        //
-        // 不能假设这里一定是 `Some`：上面的 `title_bar` 里点关闭按钮会同步调
-        // `app.hide_to_tray(ctx)` → `release_ui_resources` 把纹理释放掉，同一帧
-        // 执行到这里时就已经是 `None`——`theme::paint_dotted_background` 对
-        // `None` 会优雅退化成只铺纯色背景，不 panic（同 `app_icon_texture` 的
-        // 处理方式，见 `pages::virus_db_about_column`）。
         let dotted_bg_texture = self.dotted_bg_texture.clone();
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(colors::BG_APP))

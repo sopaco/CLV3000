@@ -76,12 +76,24 @@ fn main() {
 /// 按平台配置窗口装饰：Windows 用系统标题栏（避免无边框时客户区顶部"幽灵标题栏"
 /// 导致鼠标坐标与 egui 绘制差一个标题栏高度）；macOS 继续自绘标题栏。
 fn build_viewport(window_icon: egui::IconData) -> egui::ViewportBuilder {
+    // 最小值要 ≤ 关于独占窗口尺寸（ABOUT_WINDOW_SIZE，见 app/mod.rs），否则 winit
+    // 会把关于窗口夹到这个最小值、缩不小、背后仍留大片黑底。高度故意跟
+    // ABOUT_WINDOW_SIZE 的高度保持相等（不只是"≤"）：这样主窗口被手动缩到最小时，
+    // 也不会比关于页需要的高度更矮——两处高度改动要一起改。
+    //
+    // 按平台区分：ABOUT_WINDOW_SIZE 在 macOS/Linux 和 Windows 上高度不一样
+    // （Windows 用系统标题栏、不用像 macOS/Linux 那样在 InnerSize 里额外留自绘
+    // 标题栏的高度，见 app/mod.rs 里 `ABOUT_WINDOW_SIZE` 的注释），这里的最小高度
+    // 必须跟对应平台那份保持一致，不能两个平台共用同一个数字。
+    #[cfg(not(windows))]
+    const MIN_INNER_SIZE: [f32; 2] = [440.0, 472.0];
+    #[cfg(windows)]
+    const MIN_INNER_SIZE: [f32; 2] = [440.0, 428.0];
+
     let mut builder = egui::ViewportBuilder::default()
         .with_title("CLV3000")
         .with_inner_size([900.0, 600.0])
-        // 最小值要 ≤ 关于独占窗口尺寸（ABOUT_WINDOW_SIZE = [480,460]，见 app/mod.rs），
-        // 否则 winit 会把关于窗口夹到这个最小值、缩不小、背后仍留大片黑底。
-        .with_min_inner_size([440.0, 460.0])
+        .with_min_inner_size(MIN_INNER_SIZE)
         .with_resizable(true)
         .with_icon(window_icon);
 

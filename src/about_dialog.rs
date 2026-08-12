@@ -241,6 +241,10 @@ pub fn paint_about_fullscreen(ui: &mut egui::Ui) {
                                     ABOUT_CLOSED.store(true, Ordering::Relaxed);
                                 }
                             });
+                            // 按钮下方补一段间隙，避免贴着卡片底部内边距显得拥挤——
+                            // 跟 `ABOUT_WINDOW_SIZE` 里加高的 12px 是配套的一半，缺了
+                            // 任一处都不够（见那边的注释）。
+                            ui.add_space(12.0);
                         });
                 },
             );
