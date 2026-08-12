@@ -13,7 +13,7 @@
 //!   数量级贴近真实机器，方便直接看 UI 效果。
 
 use super::engine;
-use super::{CancelFlag, ScanEvent};
+use super::{CancelFlag, PathSource, ScanEvent};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -86,8 +86,10 @@ pub fn run(tx: Sender<ScanEvent>, cancel: CancelFlag) {
     });
 
     // engine::run 阻塞执行，内部把 paths 写入临时文件、spawn clamscan、逐行解析 stdout。
-    // tx 的所有权在此转移给 engine，engine 在结束时发 Finished。
-    engine::run(ordered_paths, tx, cancel);
+    // tx 的所有权在此转移给 engine，engine 在结束时发 Finished。闪电扫描的列表
+    // 规模小（几百~几千条），直接整份放内存交给 engine，不用 full_scan.rs 那种
+    // 边发现边落盘的流式写法。
+    engine::run(PathSource::InMemory(ordered_paths), tx, cancel);
 }
 
 #[cfg(windows)]

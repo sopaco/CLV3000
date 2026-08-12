@@ -48,6 +48,14 @@ pub fn init() {
         let src = TrayIconEvent::receiver();
         let dst = &TRAY_EVENTS.get().expect("init set TRAY_EVENTS").0;
         while let Ok(event) = src.recv() {
+            // 只在双击时抢前台——双击是显示主窗口，不会弹出菜单。
+            // 单击（尤其是右键）可能触发系统弹出上下文菜单，此时调
+            // SetForegroundWindow 把主窗口拉到前台会让菜单失去前台
+            // 焦点而自动关闭（Windows 弹出菜单在前台丢失时自动 dismiss）。
+            #[cfg(target_os = "windows")]
+            if matches!(event, TrayIconEvent::DoubleClick { .. }) {
+                crate::macos_reopen::set_foreground();
+            }
             if dst.send(event).is_err() {
                 break;
             }
@@ -63,6 +71,11 @@ pub fn init() {
             if dst.send(event).is_err() {
                 break;
             }
+            // 菜单项点击时菜单已经关闭（TrackPopupMenu 是同步的，用户选择后
+            // 函数返回、菜单 dismiss，然后才发送命令事件），此时
+            // SetForegroundWindow 不会关掉任何菜单，安全。
+            #[cfg(target_os = "windows")]
+            crate::macos_reopen::set_foreground();
             ping();
         }
     });

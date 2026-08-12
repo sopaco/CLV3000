@@ -27,9 +27,16 @@ windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Th
 # macOS 专属：检测 Dock 图标点击 / Cmd+Tab 切回本 App，用于唤回被隐藏到托盘的主窗口
 # （winit 0.30 故意不处理 macOS 的 dock 重新打开事件，见 src/macos_reopen.rs）。
 # 版本号与依赖图里已锁定的 objc2 完全一致，不会触发重新解析或联网下载。
+#
+# objc2-foundation 只开 NSProcessInfo/NSString 两个 feature（默认 feature 集
+# 巨大，几十个 Foundation 类全开），已经作为 objc2-app-kit 的间接依赖存在于
+# 依赖图里，这里加最小 feature 集不会触发重新联网解析。用途见
+# `macos_reopen::ScanActivity`：扫描期间告诉系统"这是用户发起的前台工作，
+# 不要 App Nap"，避免从"窗口被遮挡/非活跃"节流状态里被动唤醒时那一下卡顿。
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 objc2-app-kit = "0.3.2"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSProcessInfo", "NSString"] }
 
 # 给 exe 嵌图标资源用的（见 build.rs）。
 #

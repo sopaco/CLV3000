@@ -1,4 +1,4 @@
-//! 可复用 UI 组件：圆环进度、状态徽标、威胁卡片、Toast 提示。
+//! 可复用 UI 组件：圆环进度、状态胶囊、威胁卡片、Toast 提示。
 
 use crate::theme::colors;
 use egui::{Align2, Color32, FontId, Pos2, Response, Sense, Stroke, Ui, Vec2, epaint::PathStroke};
@@ -209,7 +209,9 @@ pub fn measure_text_width(ui: &Ui, text: &str, size: f32) -> f32 {
 /// 全局 item_spacing) + 两段文字宽度。value 走的是 `bold_label`（横向多描 0.6px）。
 fn stat_pill_width(ui: &Ui, value: &str, label: &str) -> f32 {
     let value_w = measure_text_width(ui, value, 14.0) + 0.6;
-    let label_w = measure_text_width(ui, label, 14.0 * 0.85); // `.small()` 约等于正文的 85%
+    // `.small()` 在 theme.rs 里被覆盖成跟 Body 一样大（14px），不是 egui 默认的缩小字号，
+    // 量的时候要用同一个 14.0，不能按"small 应该更小"的直觉去猜一个缩放系数。
+    let label_w = measure_text_width(ui, label, 14.0);
     16.0 * 2.0 + 1.0 * 2.0 + 10.0 + value_w + label_w
 }
 
@@ -307,7 +309,7 @@ pub fn threat_card(ui: &mut Ui, virus_name: &str, path: &str) -> ThreatAction {
         .inner_margin(egui::Margin::same(14))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let icon_size = 39.0; // 原本 34，图标整体 +15% 的一部分
+                let icon_size = 39.0;
                 let (icon_response, painter) =
                     ui.allocate_painter(Vec2::splat(icon_size), Sense::hover());
                 let icon_rect = icon_response.rect;

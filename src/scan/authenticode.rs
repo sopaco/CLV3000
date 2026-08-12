@@ -129,30 +129,14 @@ mod win {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use std::io::Read;
     use std::path::Path;
     use std::process::Command;
 
-    /// Mach-O 魔数（含 fat/universal 二进制）。命中其一才是 Mach-O 可执行文件，
-    /// 只对它们跑 `codesign` 校验，避免对文档/图片无意义地 spawn 子进程。
+    /// 判断是否是 Mach-O 可执行文件（含 fat/universal 二进制）。命中才跑 `codesign`
+    /// 校验，避免对文档/图片无意义地 spawn 子进程。实现见 `scan::is_macho_file`——
+    /// 与 `full_scan::real_macos::walk` 共用同一份魔数判断，不重复维护两份。
     pub fn is_macho_file(path: &Path) -> bool {
-        let mut f = match std::fs::File::open(path) {
-            Ok(f) => f,
-            Err(_) => return false,
-        };
-        let mut magic = [0u8; 4];
-        if f.read_exact(&mut magic).is_err() {
-            return false;
-        }
-        matches!(
-            magic,
-            [0xFE, 0xED, 0xFA, 0xCE] | // MH_MAGIC（32 位）
-            [0xCE, 0xFA, 0xED, 0xFE] | // MH_CIGAM
-            [0xFE, 0xED, 0xFA, 0xCF] | // MH_MAGIC_64
-            [0xCF, 0xFA, 0xED, 0xFE] | // MH_CIGAM_64
-            [0xCA, 0xFE, 0xBA, 0xBE] | // FAT_MAGIC（universal）
-            [0xBE, 0xBA, 0xFE, 0xCA]   // FAT_CIGAM
-        )
+        crate::scan::is_macho_file(path)
     }
 
     /// 用系统 `codesign --verify` 校验 Mach-O 的代码签名：签名且未被篡改 → 退出码 0 → 可信。
