@@ -9,7 +9,7 @@ mod freshclam;
 mod pages;
 mod util;
 
-use crate::lifecycle::{Lifecycle, RunMode};
+use crate::lifecycle::{InitialMode, Lifecycle, RunMode};
 use crate::sysmon::{self, ResourceSample, SysMonHandle};
 use crate::theme::{self, colors};
 use crate::tray::Tray;
@@ -158,25 +158,67 @@ fn load_texture(
     ctx.load_texture(name, color_image, egui::TextureOptions::LINEAR)
 }
 
+/// Windows：压缩进程工作集，把已释放但未归还 OS 的物理内存页换出。非 Windows
+/// 平台为空操作。在 `hide_to_tray` 时调用，让任务管理器里的内存数字尽快下降。
+#[cfg(windows)]
+fn trim_working_set() {
+    use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+    // SAFETY: `GetCurrentProcess()` 返回当前进程的伪句柄（-1），无需 close。
+    // `(usize::MAX, usize::MAX)` 即 `(SIZE_T)-1`，文档明确等价于 EmptyWorkingSet。
+    let _ = unsafe { SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX) };
+}
+
+#[cfg(not(windows))]
+fn trim_working_set() {}
+
 impl App {
     /// `tray`：main.rs 里已经建好的托盘（可能因为初始化失败而是 `None`，此时
-    /// 无托盘运行）。`start_tray_only`：`--tray-only` 命令行参数，决定初始
-    /// 生命周期模式与主窗口是否一开始就隐藏。
+    /// 无托盘运行）。`initial`：启动初始模式（直接显示/托盘隐藏/闪电扫描/关于），
+    /// 由 `main` 根据 `--tray-only` 与托盘事件决定。
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         tray: Option<Tray>,
-        start_tray_only: bool,
+        initial: InitialMode,
     ) -> Self {
         theme::apply(&cc.egui_ctx);
         // 注册当前会话的 egui Context，让 wakeup 转发线程 / sysmon 采样线程能在
         // 有事件（托盘点击、菜单、资源采样）时主动唤醒 UI——替代旧的定时心跳。
         crate::wakeup::register_ctx(&cc.egui_ctx);
 
-        let lifecycle = Lifecycle::new(start_tray_only);
-        let window_hidden = lifecycle.mode == RunMode::TrayOnly;
+        // TrayOnly 与 About 都以「托盘态」为基（mode=TrayOnly）：About 在此基础上
+        // 打开关于独占窗口，reconcile 据此把窗口显示出来；关闭关于后因 mode 仍是
+        // TrayOnly 而自动缩回托盘。ShowWindow/QuickScan 以显示窗口为基。
+        let start_tray_only = matches!(initial, InitialMode::TrayOnly | InitialMode::About);
+        let mut lifecycle = Lifecycle::new(start_tray_only);
+        let mut core = AppCore::new();
+
+        match initial {
+            InitialMode::ShowWindow | InitialMode::TrayOnly => {}
+            InitialMode::QuickScan => {
+                core.page = Page::QuickScan;
+                // 全盘扫描在跑时不抢启动闪电扫描（与 poll_tray_events 一致）。
+                if !core.full.is_running() {
+                    core.quick.start(core.config.scan_removable_drives);
+                }
+            }
+            InitialMode::About => {
+                lifecycle.about_open = true;
+                lifecycle.about_standalone = true;
+            }
+        }
+
+        // starts_hidden：窗口以隐藏姿态创建（with_visible(false)）。TrayOnly 是
+        // macOS 托盘态（保持隐藏）；About 也以隐藏创建，由 reconcile 首帧按关于尺寸
+        // 显示，避免先闪 900x600 再缩到关于尺寸。
+        let window_hidden = matches!(initial, InitialMode::TrayOnly | InitialMode::About);
+        // macOS tray-only 防闪兜底：立即发 Visible(false)。About 走 reconcile 显示，
+        // 不在这里发（窗口已 with_visible(false) 隐藏，reconcile 首帧会按关于尺寸显示）。
+        if matches!(initial, InitialMode::TrayOnly) {
+            cc.egui_ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        }
 
         Self {
-            core: AppCore::new(),
+            core,
             lifecycle,
             tray,
             sysmon: None,
@@ -240,8 +282,17 @@ impl App {
     /// 释放 GPU 纹理与资源监控，为纯托盘模式腾出内存。
     fn release_ui_resources(&mut self, ctx: &egui::Context) {
         self.sysmon.take();
+        // 清空 egui 的跨帧状态（widget 位置/滚动/折叠状态、计算缓存、layer 变换），
+        // 减少隐藏到托盘时的内存占用。GPU 侧的字体纹理和 OpenGL 渲染上下文由
+        // eframe 会话持有，会话存活期间无法释放；但 egui 自身的 Memory 在窗口
+        // 重新打开时会按需重建，清掉不影响功能。
+        ctx.memory_mut(|m| {
+            m.data.clear();
+            m.caches = Default::default();
+            m.reset_areas();
+            m.to_global.clear();
+        });
         // 纹理句柄 drop 即可；随后 eframe 会话结束会释放 OpenGL 资源。
-        let _ = ctx;
         self.app_icon_texture.take();
         #[cfg(not(windows))]
         self.titlebar_icon_texture.take();
@@ -266,6 +317,12 @@ impl App {
         ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         self.window_hidden = true;
         self.activate_countdown = 0;
+        // Windows：主动压缩进程工作集，把释放后的物理内存页还给 OS。Rust 的
+        // allocator（默认 msvcrt 堆）drop 后不一定立即把内存还给系统，工作集可能
+        // 仍保留旧峰值。`SetProcessWorkingSetSize(-1, -1)` 等同 `EmptyWorkingSet`，
+        // 让内核把能换出的页换出，任务管理器里的内存数字会立刻下降。托盘态下进程
+        // 基本空闲，换出的页不会被频繁触回，代价极低。
+        trim_working_set();
     }
 
     fn poll_tray(&mut self) {
@@ -359,6 +416,9 @@ impl App {
             crate::macos_reopen::set_accessory(true);
         } else {
             // 已隐藏：确保每个隐藏周期都落到 Accessory（例如 `--tray-only` 启动即隐藏）。
+            // 同时重复发 Visible(false) 兜底——即使窗口因 eframe 初始化逻辑被短暂显示，
+            // 这里也能在下一帧把它藏回来。Visible(false) 对已隐藏窗口是 no-op，开销极低。
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
             #[cfg(target_os = "macos")]
             crate::macos_reopen::set_accessory(true);
         }

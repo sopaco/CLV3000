@@ -19,7 +19,7 @@ mod tray;
 mod wakeup;
 mod widgets;
 
-use lifecycle::parse_start_tray_only;
+use lifecycle::{parse_start_tray_only, InitialMode};
 
 fn main() {
     if !single_instance::acquire() {
@@ -50,27 +50,126 @@ fn main() {
         height: win_icon_h,
     };
 
+    // `--tray-only` 启动时（Windows）在 eframe 之外空等托盘事件，完全不创建窗口——
+    // 既不闪窗、也不占用 OpenGL 上下文内存，直到用户从托盘请求显示窗口/关于或退出。
+    // 这是规避 eframe「首帧强制 set_visible(true)」闪窗的唯一办法（见
+    // epi_integration.rs 的 post_rendering）：只要调了 `eframe::run_native`，窗口
+    // 就一定会被创建并在首帧显示，`with_visible(false)` 拦不住。
+    // macOS 的 tray-only 仍直接启动 eframe（隐藏），因为托盘事件投递依赖
+    // NSApplication 事件循环，eframe 之外空等收不到托盘点击。
+    let initial = match resolve_initial_mode(&tray, start_tray_only) {
+        Some(i) => i,
+        None => return, // tray-only 下用户从托盘退出
+    };
+
     // `eframe::run_native` 只调用这一次，阻塞到用户真正退出（托盘菜单"退出"）
-    // 才返回——不像早期版本那样在一个 `loop` 里按 `RunMode` 反复销毁/重建
-    // eframe 会话（那样做在 macOS 上会让托盘事件投递失效）。窗口可见性、
-    // 隐藏到托盘、关于覆盖层全部由 `App::logic`/`App::ui` 内部按生命周期模式
-    // 对账，这里不需要关心。`AppCore`/`Lifecycle` 也因此不再需要
-    // `Rc<RefCell<_>>` 跨会话共享，直接在 `App::new` 内部构造、由 `App` 全程
-    // own。
+    // 才返回。窗口可见性、隐藏到托盘、关于覆盖层全部由 `App::logic`/`App::ui`
+    // 内部按生命周期模式对账。
+    //
+    // About 也以隐藏姿态创建（with_visible(false)），由 `reconcile_lifecycle` 首帧
+    // 按关于尺寸显示，避免先闪 900x600 主窗再缩到关于尺寸。
+    let starts_hidden = matches!(initial, InitialMode::TrayOnly | InitialMode::About);
     let native_options = eframe::NativeOptions {
-        viewport: build_viewport(window_icon)
-            // `--tray-only` 启动时不闪一下主窗口：初始就隐藏，交由 `App::logic`
-            // 维持托盘态。
-            .with_visible(!start_tray_only),
-        centered: true,
+        viewport: build_viewport(window_icon).with_visible(!starts_hidden),
+        // 隐藏启动时关闭居中，避免 eframe 初始化触发闪窗；可见启动正常居中。
+        centered: !starts_hidden,
         ..Default::default()
     };
 
     let _ = eframe::run_native(
         "CLV3000",
         native_options,
-        Box::new(move |cc| Ok(Box::new(app::App::new(cc, tray, start_tray_only)))),
+        Box::new(move |cc| Ok(Box::new(app::App::new(cc, tray, initial)))),
     );
+}
+
+/// 决定 eframe 启动时的初始模式。`--tray-only` 启动时：
+/// - Windows：在 eframe 之外空等托盘事件（`wait_in_tray`），直到用户请求显示
+///   窗口/关于/退出。返回 `None` 表示用户从托盘退出，main 直接 return。
+/// - macOS / 其它：仍启动 eframe（隐藏），因为托盘事件投递依赖 NSApplication
+///   事件循环，eframe 之外空等收不到托盘点击。
+fn resolve_initial_mode(tray: &Option<tray::Tray>, start_tray_only: bool) -> Option<InitialMode> {
+    if !start_tray_only {
+        return Some(InitialMode::ShowWindow);
+    }
+    #[cfg(windows)]
+    {
+        if let Some(t) = tray.as_ref() {
+            return wait_in_tray(t);
+        }
+        // 托盘初始化失败：没有托盘就无法从后台唤回，直接显示主窗口兜底。
+        return Some(InitialMode::ShowWindow);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = tray;
+        Some(InitialMode::TrayOnly)
+    }
+}
+
+/// Windows tray-only 启动：在 eframe 之外跑 Win32 消息循环，不创建任何窗口。
+/// 返回 `Some(mode)` 表示用户请求显示窗口（或关于/闪电扫描），`None` 表示退出。
+///
+/// **必须跑消息循环**：tray-icon/muda 在主线程创建消息窗口（`CreateWindowExW`），
+/// 其 wndproc（`tray_proc`）只有 `GetMessage`/`PeekMessage`+`DispatchMessage` 时
+/// 才会被调用来处理托盘点击和菜单命令。condvar 阻塞不行—— wndproc 不跑，
+/// 托盘点不出菜单、事件不进 channel。
+#[cfg(windows)]
+fn wait_in_tray(tray: &tray::Tray) -> Option<InitialMode> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, MSG, MsgWaitForMultipleObjectsEx, MWMO_INPUTAVAILABLE,
+        MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS, PeekMessageW, PM_REMOVE, QS_ALLINPUT,
+        TranslateMessage, WM_QUIT,
+    };
+    use tray_icon::TrayIconEvent;
+
+    let mut msg = MSG::default();
+    loop {
+        // 1. 排空转发到我们 channel 的托盘图标事件（双击 → 显示主窗口）。
+        while let Ok(event) = crate::wakeup::tray_events().lock().unwrap().try_recv() {
+            if matches!(event, TrayIconEvent::DoubleClick { .. }) {
+                return Some(InitialMode::ShowWindow);
+            }
+        }
+        // 排空菜单事件。
+        while let Ok(event) = crate::wakeup::menu_events().lock().unwrap().try_recv() {
+            let id = event.id();
+            if id == &tray.ids.show {
+                return Some(InitialMode::ShowWindow);
+            } else if id == &tray.ids.quick_scan {
+                return Some(InitialMode::QuickScan);
+            } else if id == &tray.ids.about {
+                return Some(InitialMode::About);
+            } else if id == &tray.ids.quit {
+                return None;
+            }
+        }
+
+        // 2. PeekMessage 非阻塞排空消息队列，DispatchMessage 让 tray-icon/muda 的
+        //    wndproc 处理托盘点击和菜单命令（wndproc 发事件到内部 channel，
+        //    转发线程再转发到我们的 channel，下一轮循环顶部排空）。
+        unsafe {
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                if msg.message == WM_QUIT {
+                    return None;
+                }
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+
+        // 3. 阻塞等待新消息到达（0 CPU）。30ms 超时兜底转发线程与主线程的竞态：
+        //    dispatch 后转发线程可能还没把事件转发到我们的 channel，本轮排空落空，
+        //    30ms 后超时醒来再排空一次。托盘点击延迟 30ms 无感。
+        let _ = unsafe {
+            MsgWaitForMultipleObjectsEx(
+                None,
+                30,
+                QS_ALLINPUT,
+                MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS(MWMO_INPUTAVAILABLE.0),
+            )
+        };
+    }
 }
 
 /// 按平台配置窗口装饰：Windows 用系统标题栏（避免无边框时客户区顶部"幽灵标题栏"

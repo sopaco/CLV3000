@@ -83,6 +83,8 @@ pub fn init() {
 
 /// 唤醒 UI 跑一帧（若当前有注册中的 egui Context）。
 /// 没有注册时静默丢弃唤醒——事件已在队列里，下个会话的第一帧会消费。
+/// tray-only 启动模式（eframe 未启动）下 Context 槽位为空，ping 是 no-op，
+/// 主线程在 `main::wait_in_tray` 里跑 Win32 消息循环自己排空 channel。
 fn ping() {
     if let Some(ctx) = &*REPAINT_CTX.lock().unwrap() {
         ctx.request_repaint();
