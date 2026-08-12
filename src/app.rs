@@ -269,6 +269,16 @@ enum UpdateOutcome {
     AlreadyUpToDate,
 }
 
+/// `paths::clamscan_available()` + `resolved_clamav_database_dir()` 的探测结果。
+/// 这两个查询要 `is_file()`/`read_dir()`，macOS 上 `clamscan_available` 在内置/系统
+/// 路径都没找到时还要整个扫一遍 `PATH` 逐目录 `is_file()`——这些结果在一次运行里
+/// 几乎不会变，之前每次画病毒库页都会重新查一遍（哪怕只是鼠标在窗口里晃一下触发
+/// 的重绘），纯属浪费。见 `VirusDbState::engine_probe`。
+struct EngineProbe {
+    available: bool,
+    detail_dir: PathBuf,
+}
+
 struct VirusDbState {
     updating: bool,
     rx: Option<Receiver<Result<UpdateOutcome, String>>>,
@@ -281,6 +291,8 @@ struct VirusDbState {
     about_col_height: f32,
     /// 当前病毒库版本（来自 `clamscan -V`），更新完成后刷新，避免界面一直显示旧版本。
     db_version: Option<String>,
+    /// 引擎可用性 + 病毒库目录探测结果的缓存，`None` 表示需要（重新）探测一次。
+    engine_probe: Option<EngineProbe>,
 }
 
 impl VirusDbState {
@@ -292,7 +304,32 @@ impl VirusDbState {
             status_col_height: 0.0,
             about_col_height: 0.0,
             db_version: None,
+            engine_probe: None,
         }
+    }
+
+    /// 懒探测一次引擎可用性 + 病毒库目录，之后每帧直接复用缓存结果。
+    fn engine_probe(&mut self) -> &EngineProbe {
+        if self.engine_probe.is_none() {
+            let available = paths::clamscan_available();
+            let detail_dir = if available {
+                paths::resolved_clamav_database_dir().unwrap_or_else(paths::clamav_database_dir)
+            } else {
+                paths::clamav_dir()
+            };
+            self.engine_probe = Some(EngineProbe {
+                available,
+                detail_dir,
+            });
+        }
+        self.engine_probe.as_ref().expect("just set above")
+    }
+
+    /// 更新成功真的落了新文件时，之前"未找到病毒库"的探测结果可能已经过期
+    /// （比如首次更新前候选目录都是空的）——清掉缓存，下次画面重新探测一次。
+    /// "已是最新"没有文件变化，不需要重新探测。
+    fn invalidate_engine_probe(&mut self) {
+        self.engine_probe = None;
     }
 
     /// 异步重新查询病毒库版本：后台线程跑 `clamscan -V`，结果经 `version_rx` 回传，
@@ -588,6 +625,15 @@ impl AppCore {
         }
     }
 
+    /// 闪电扫描和全盘扫描是否有任意一个正在跑。两者共享临时扫描列表文件命名
+    /// （`/tmp/clv3000_scanlist_<pid>.txt`，见 `engine.rs`）与文件基因缓存
+    /// （`ScanCache`，见 `cache.rs`）——`ScanPageState::start` 只检查自己这一页，
+    /// 不知道另一页也在跑，两个扫描并发会互相覆盖对方的临时文件、缓存落盘时
+    /// 后写者整体覆盖前写者。所有触发扫描的入口都必须先查这个再决定是否放行。
+    fn any_scan_running(&self) -> bool {
+        self.quick.is_running() || self.full.is_running()
+    }
+
     /// 轮询扫描/病毒库后台线程；返回需要弹 Toast 的消息（仅窗口会话消费）。
     /// `ctx` 透传给更新完成后的版本号刷新（后台线程完成时要能唤醒 UI）。
     pub fn poll_background(&mut self, ctx: &egui::Context) -> Vec<String> {
@@ -618,6 +664,7 @@ impl AppCore {
             match result {
                 Ok(UpdateOutcome::Updated) => {
                     self.virus_db.refresh_db_version(ctx.clone());
+                    self.virus_db.invalidate_engine_probe();
                     toasts.push("Virus database updated".to_string());
                 }
                 Ok(UpdateOutcome::AlreadyUpToDate) => {
@@ -662,7 +709,11 @@ pub fn poll_tray_events(tray: &Tray, core: &mut AppCore, lifecycle: &mut Lifecyc
             lifecycle.about_open = false;
             lifecycle.about_standalone = false;
             core.page = Page::QuickScan;
-            core.quick.start(core.config.scan_removable_drives);
+            // 全盘扫描已经在跑时不要抢着启动闪电扫描（见 `any_scan_running` 的
+            // 注释）——只切到闪电扫描页让用户看到当前状态，不触发新扫描。
+            if !core.full.is_running() {
+                core.quick.start(core.config.scan_removable_drives);
+            }
             focus_requested = true;
         } else if id == &tray.ids.about {
             // 来自托盘的关于：只占整个窗口画关于页，不画主界面（about_standalone）。
@@ -692,6 +743,10 @@ pub struct App {
     /// （Windows 用系统标题栏，不加载）。
     #[cfg(not(windows))]
     titlebar_icon_texture: Option<egui::TextureHandle>,
+    /// 点阵背景瓦片纹理（`theme::dotted_tile_image`），平铺整块背景用。跟其它
+    /// 纹理一样按会话生命周期缓存，避免每帧重新生成（见 `theme::paint_dotted_background`
+    /// 顶部注释——这原本是每帧几百个矢量圆重新 tessellate，现在只是一次纹理生成）。
+    dotted_bg_texture: Option<egui::TextureHandle>,
     /// 主视口当前是否处于「隐藏到托盘」状态。eframe 会话全程存活（不再关闭重建），
     /// 关闭窗口改成 `Visible(false)` 隐藏视口，靠这个标志位在 `logic` 里把生命周期
     /// 模式（ShowWindow / TrayOnly）对齐到真实的视口可见性。
@@ -752,6 +807,7 @@ impl App {
             app_icon_texture: None,
             #[cfg(not(windows))]
             titlebar_icon_texture: None,
+            dotted_bg_texture: None,
             window_hidden,
             activate_countdown: 0,
             size_intent: 0,
@@ -797,6 +853,13 @@ impl App {
                 crate::icon_data::load_tray_icon(64),
             ));
         }
+        if self.dotted_bg_texture.is_none() {
+            self.dotted_bg_texture = Some(ctx.load_texture(
+                "dotted_bg_tile",
+                theme::dotted_tile_image(),
+                egui::TextureOptions::LINEAR_REPEAT,
+            ));
+        }
     }
 
     /// 释放 GPU 纹理与资源监控，为纯托盘模式腾出内存。
@@ -807,6 +870,7 @@ impl App {
         self.app_icon_texture.take();
         #[cfg(not(windows))]
         self.titlebar_icon_texture.take();
+        self.dotted_bg_texture.take();
         self.toasts.clear();
         self.last_sample = ResourceSample::default();
     }
@@ -1166,10 +1230,23 @@ impl eframe::App for App {
             .frame(egui::Frame::default().fill(colors::BG_SIDEBAR))
             .show(ui, |ui| sidebar(ui, &ctx, self));
 
+        // 克隆纹理句柄（内部是 Arc，克隆很轻）出来，避免闭包里既要不可变借用
+        // `self.dotted_bg_texture` 画背景、又要可变借用 `self` 传给各页面渲染函数。
+        //
+        // 不能假设这里一定是 `Some`：上面的 `title_bar` 里点关闭按钮会同步调
+        // `app.hide_to_tray(ctx)` → `release_ui_resources` 把纹理释放掉，同一帧
+        // 执行到这里时就已经是 `None`——`theme::paint_dotted_background` 对
+        // `None` 会优雅退化成只铺纯色背景，不 panic（同 `app_icon_texture` 的
+        // 处理方式，见 `virus_db_about_column`）。
+        let dotted_bg_texture = self.dotted_bg_texture.clone();
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(colors::BG_APP))
             .show(ui, |ui| {
-                theme::paint_dotted_background(ui.painter(), ui.max_rect());
+                theme::paint_dotted_background(
+                    ui.painter(),
+                    ui.max_rect(),
+                    dotted_bg_texture.as_ref(),
+                );
                 let page = self.core.borrow().page;
                 match page {
                     Page::Dashboard => dashboard_page(ui, &ctx, self),
@@ -1450,15 +1527,23 @@ fn dashboard_page(ui: &mut egui::Ui, _ctx: &egui::Context, app: &mut App) {
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 if action_button(ui, "Quick Scan", |p, r, s| icons::bolt(p, r, s.color)) {
-                    let removable = app.core.borrow().config.scan_removable_drives;
                     app.navigate(Page::QuickScan);
-                    app.core.borrow_mut().quick.start(removable);
+                    if app.core.borrow().any_scan_running() {
+                        app.toast("Finish the current scan before starting another");
+                    } else {
+                        let removable = app.core.borrow().config.scan_removable_drives;
+                        app.core.borrow_mut().quick.start(removable);
+                    }
                 }
                 ui.add_space(BTN_GAP);
                 if action_button(ui, "Full Scan", icons::computer) {
-                    let removable = app.core.borrow().config.scan_removable_drives;
                     app.navigate(Page::FullScan);
-                    app.core.borrow_mut().full.start(removable);
+                    if app.core.borrow().any_scan_running() {
+                        app.toast("Finish the current scan before starting another");
+                    } else {
+                        let removable = app.core.borrow().config.scan_removable_drives;
+                        app.core.borrow_mut().full.start(removable);
+                    }
                 }
             },
         );
@@ -1582,6 +1667,9 @@ fn action_button_response(
 
 fn quick_scan_page(ui: &mut egui::Ui, app: &mut App) {
     let mut core = app.core.borrow_mut();
+    // 借 `AppCore` 之前先看一眼另一页在不在跑——`is_running()` 只读 `&self`，
+    // 跟紧接着的可变解构（`&mut *core`）不冲突。
+    let other_running = core.full.is_running();
     let AppCore { quick, config, .. } = &mut *core;
     scan_page(
         ui,
@@ -1592,11 +1680,13 @@ fn quick_scan_page(ui: &mut egui::Ui, app: &mut App) {
         colors::ACCENT_BLUE,
         |p, r, s| icons::bolt(p, r, s.color),
         true,
+        other_running,
     );
 }
 
 fn full_scan_page(ui: &mut egui::Ui, app: &mut App) {
     let mut core = app.core.borrow_mut();
+    let other_running = core.quick.is_running();
     let AppCore { full, config, .. } = &mut *core;
     scan_page(
         ui,
@@ -1607,6 +1697,7 @@ fn full_scan_page(ui: &mut egui::Ui, app: &mut App) {
         colors::ACCENT_BLUE,
         icons::computer,
         true,
+        other_running,
     );
 }
 
@@ -1643,7 +1734,9 @@ fn centered_card(
 }
 
 // 参数是有点多，但拆成一个配置 struct 目前收益不大（调用点就 2 个，字段名本身
-// 已经很直白），先用 allow 压掉这条 lint。
+// 已经很直白），先用 allow 压掉这条 lint。`other_running`：另一类扫描（闪电/
+// 全盘）是否正在跑——两者共享临时扫描列表文件与文件基因缓存，绝不能并发，见
+// `AppCore::any_scan_running` 的注释。
 #[allow(clippy::too_many_arguments)]
 fn scan_page(
     ui: &mut egui::Ui,
@@ -1654,6 +1747,7 @@ fn scan_page(
     ring_color: Color32,
     icon: fn(&egui::Painter, egui::Rect, Stroke),
     show_start_button_when_idle: bool,
+    other_running: bool,
 ) {
     // 跟 dashboard_page 一样：内容少（Idle/Done 态、没有威胁列表）时用上一帧测量到
     // 的高度把这一帧的空白平分到上下，不让内容整体贴着顶部。内容比可用高度还高时
@@ -1697,7 +1791,13 @@ fn scan_page(
                     let left = (ui.available_width() - btn_w) / 2.0 - START_BTN_SHIFT_LEFT;
                     ui.add_space(left.max(0.0));
                     if show_start_button_when_idle && action_button(ui, &label, icon) {
-                        state.start(config.scan_removable_drives);
+                        if other_running {
+                            toasts.push(Toast::new(
+                                "Finish the current scan before starting another",
+                            ));
+                        } else {
+                            state.start(config.scan_removable_drives);
+                        }
                     }
                 });
             }
@@ -1897,7 +1997,13 @@ fn scan_page(
                 );
                 ui.add_space(16.0);
                 if action_button(ui, &format!("Run {title} Again"), icon) {
-                    state.start(config.scan_removable_drives);
+                    if other_running {
+                        toasts.push(Toast::new(
+                            "Finish the current scan before starting another",
+                        ));
+                    } else {
+                        state.start(config.scan_removable_drives);
+                    }
                 }
             }
         }
@@ -1961,7 +2067,12 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
         widgets::bold_label(ui, "Virus Database", 18.0, colors::TEXT_PRIMARY);
         ui.add_space(14.0);
 
-        let available = paths::clamscan_available();
+        // 引擎可用性 + 病毒库目录只在首次探测（或更新成功后失效重探）时真的碰
+        // 文件系统，其余帧直接读缓存——见 `VirusDbState::engine_probe`。
+        let (available, detail_dir) = {
+            let probe = core.virus_db.engine_probe();
+            (probe.available, probe.detail_dir.clone())
+        };
         // 第一次画这一栏时顺带查一次版本（只查这一次，之后靠"更新完成"事件刷新），
         // 避免每帧都拉起 clamscan 进程。更新成功后 `db_version` 会从旧值刷新成新值。
         if core.virus_db.db_version.is_none() {
@@ -1971,11 +2082,6 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
             "Built-in database ready"
         } else {
             "Scan engine not found"
-        };
-        let detail_dir = if available {
-            paths::resolved_clamav_database_dir().unwrap_or_else(|| paths::clamav_database_dir())
-        } else {
-            paths::clamav_dir()
         };
         ui.label(egui::RichText::new(status).color(colors::TEXT_SECONDARY));
 

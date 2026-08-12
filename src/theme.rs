@@ -78,25 +78,72 @@ pub fn apply(ctx: &Context) {
     });
 }
 
-/// 在 `rect` 范围内画一层很淡的圆点网格背景，营造"科技感底纹"。
-pub fn paint_dotted_background(painter: &egui::Painter, rect: Rect) {
-    const SPACING: f32 = 28.0;
-    const RADIUS: f32 = 1.0;
+/// 点阵背景一个瓦片对应的逻辑尺寸（点）。原来的 `circle_filled` 实现里点间距
+/// 就是 28pt，纹理平铺方案沿用同一个数值，视觉效果不变。
+pub const DOT_TILE_PT: f32 = 28.0;
+/// 纹理超采样倍数：瓦片实际按 `DOT_TILE_PT * SUPERSAMPLE` 像素生成，只是为了让
+/// 圆点边缘有个软过渡（近似原来 `circle_filled` 自带的抗锯齿），不是为了适配
+/// 某个具体的 `pixels_per_point`——纹理经 GPU 双线性采样后再铺到屏幕上，缩放本身
+/// 就会做插值，不需要跟真实设备像素一一对应。
+const DOT_TILE_SUPERSAMPLE: usize = 4;
 
-    painter.rect_filled(rect, CornerRadius::ZERO, colors::BG_APP);
-
-    let start_x = (rect.left() / SPACING).floor() * SPACING;
-    let start_y = (rect.top() / SPACING).floor() * SPACING;
-
-    let mut y = start_y;
-    while y < rect.bottom() {
-        let mut x = start_x;
-        while x < rect.right() {
-            painter.circle_filled(egui::pos2(x, y), RADIUS, colors::DOT_GRID);
-            x += SPACING;
+/// 生成一张 `DOT_TILE_PT` 见方的点阵瓦片纹理源数据：中心一个极淡的圆点，四周
+/// 透明。配合 `TextureOptions::LINEAR_REPEAT` 平铺整块背景。
+///
+/// 为什么要从"每帧画几百个 `circle_filled`"换成"画一次纹理，每帧铺一个矩形"：
+/// `circle_filled` 提交的是矢量图元，epaint 每帧都要重新 tessellate 成三角形网格
+/// （每个带羽化的圆约 10~16 个顶点）——900×600 的面板铺满大约 600 个点，就是每帧
+/// 上万顶点的分摊开销，而这层背景纹理感本身淡到几乎看不见，付出的顶点生成成本
+/// 和它带来的视觉收益完全不成比例。烘成纹理后，无论背景铺多大，每帧只提交一个
+/// 矩形（2 个三角形），GPU 采样负责重复图案，成本从"跟点数量成正比"变成常数。
+pub fn dotted_tile_image() -> egui::ColorImage {
+    let px = (DOT_TILE_PT as usize) * DOT_TILE_SUPERSAMPLE;
+    let radius_px = DOT_TILE_SUPERSAMPLE as f32; // 对应逻辑半径 1.0pt
+    let center = px as f32 / 2.0;
+    let mut pixels = vec![Color32::TRANSPARENT; px * px];
+    for y in 0..px {
+        for x in 0..px {
+            let dx = x as f32 + 0.5 - center;
+            let dy = y as f32 + 0.5 - center;
+            let dist = (dx * dx + dy * dy).sqrt();
+            // 边缘留 1 像素的软过渡，近似原来矢量圆的抗锯齿羽化。
+            let coverage = (radius_px + 1.0 - dist).clamp(0.0, 1.0);
+            if coverage <= 0.0 {
+                continue;
+            }
+            // DOT_GRID 本身是 premultiplied 颜色（r=g=b=a，纯白按 alpha 比例乘过）；
+            // 按 coverage 等比缩小 rgb 和 a，premultiplied 语义仍然成立。
+            let v = (colors::DOT_GRID.r() as f32 * coverage).round() as u8;
+            let a = (colors::DOT_GRID.a() as f32 * coverage).round() as u8;
+            pixels[y * px + x] = Color32::from_rgba_premultiplied(v, v, v, a);
         }
-        y += SPACING;
     }
+    egui::ColorImage::new([px, px], pixels)
+}
+
+/// 在 `rect` 范围内铺一层很淡的圆点网格背景，营造"科技感底纹"。`tile` 是
+/// `dotted_tile_image()` 生成、并以 `TextureOptions::LINEAR_REPEAT` 加载好的纹理
+/// （由调用方缓存复用，见 `App::ensure_ui_resources`），这里只负责按 `rect` 尺寸
+/// 算好重复次数的 UV 并画一次。
+///
+/// `tile` 是 `Option`：跟 `app_icon_texture`/`titlebar_icon_texture` 一样，纹理
+/// 可能在本帧还没加载、或刚被 `release_ui_resources` 释放——自绘标题栏的关闭按钮
+/// （`title_bar` 里 `app.hide_to_tray(ctx)`）会在 `ui()` 走到这里**之前**同步释放
+/// 资源，同一帧稍后仍会画到这块背景，如果这里硬取值（`.expect()`/`.unwrap()`）
+/// 就会直接 panic。`None` 时只铺纯色背景、跳过点阵，视觉上无害（下一帧资源已经
+/// 因为窗口隐藏而不会再被用到）。
+pub fn paint_dotted_background(
+    painter: &egui::Painter,
+    rect: Rect,
+    tile: Option<&egui::TextureHandle>,
+) {
+    painter.rect_filled(rect, CornerRadius::ZERO, colors::BG_APP);
+    let Some(tile) = tile else { return };
+    let uv = Rect::from_min_max(
+        egui::pos2(0.0, 0.0),
+        egui::pos2(rect.width() / DOT_TILE_PT, rect.height() / DOT_TILE_PT),
+    );
+    painter.image(tile.id(), rect, uv, Color32::WHITE);
 }
 
 /// 圆角矩形卡片背景，带边框，供各页面复用。

@@ -8,7 +8,12 @@
 //!   错过了用户手势的 foreground 权限窗口，不主动调就只闪任务栏）。
 //! - **其它平台**：no-op stub，调用方无需写 `#[cfg]` 分支。
 
+// `set_foreground` 只在 Windows 侧的 `wakeup.rs` 里被调用（`#[cfg(target_os =
+// "windows")]` 门控）；macOS 的唤回完全靠 `bring_to_front` + `activate_countdown`，
+// 这里的 `set_foreground` 只是补齐跨平台统一接口的 no-op stub，在 macOS 构建下
+// 永远不会被调用——跟下面 Windows/其它平台的 `imp` 模块一样需要 `allow(dead_code)`。
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 mod imp {
     use std::sync::atomic::{AtomicBool, Ordering};
 
