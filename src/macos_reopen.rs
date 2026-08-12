@@ -86,27 +86,50 @@ mod imp {
     /// 是否处于 Accessory 模式**，直接把窗口设为可见并提到所有窗口最前。这里两者都做：
     /// `activate()` 让 App 成为前台 App（键盘焦点交给系统），`orderFrontRegardless()`
     /// 兜底强制窗口可见且置顶。
-    pub fn bring_to_front() {
-        if let Some(mtm) = MainThreadMarker::new() {
-            let app = NSApplication::sharedApplication(mtm);
+    ///
+    /// 返回值给调用方（`app/mod.rs` 的 `activate_countdown` 循环）做"提前收敛"判断：
+    /// `true` 表示**这一帧没做任何纠正动作**（App 已经 active、每个窗口都已经是
+    /// key window）——调用方据此可以立刻把倒计时清零，不必再跑满 `ACTIVATE_FRAMES`
+    /// 帧。`false` 表示这一帧确实调了 `activate()`/`orderFrontRegardless()` 中的至少
+    /// 一个，状态还没稳定，下一帧要再确认一次才能信——不能仅凭"这一帧调过"就直接判定
+    /// 成功，AppKit 这两个 API 都没有同步的成功回执，效果是否真的生效要等下一帧的
+    /// `isActive()`/`isKeyWindow()` 读数才能确认。
+    pub fn bring_to_front() -> bool {
+        let Some(mtm) = MainThreadMarker::new() else {
+            // 拿不到主线程标记（理论上不会发生，这里全部跑在 eframe 主线程），保守起见
+            // 当作"还没收敛"，让调用方继续按原有节奏重试。
+            return false;
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        let mut converged = true;
+        // 只在真正不是前台 App 时才调 `activate()`：这个调用会让 WindowServer
+        // 走一遍完整的应用切换流程，而 macOS 自己的"切换到本 App"动画本身就要
+        // 跑 ~300-400ms（`ACTIVATE_FRAMES=12` 帧 * 30ms ≈ 360ms 正是这个倒计时
+        // 窗口这么设的原因）——`activate_countdown` 期间每帧都无条件重复调
+        // `activate()`，会在系统自己的切换动画还没播完时，在主线程上又叠一次完整
+        // 的激活流程，跟 WindowServer 的合成/动画抢主线程时间片，表现为"全盘扫描
+        // 时从后台切到前台，进度环动画在切换那几百毫秒里明显卡顿，但窗口一直在
+        // 前台/后台稳定态时都很流畅"。已经 active 时跳过。
+        if !app.isActive() {
             app.activate();
-            let windows = app.windows();
-            let count = windows.count();
-            for i in 0..count {
-                let win = windows.objectAtIndex(i);
-                // 已经是最前、拿到焦点的 key window 时跳过 `orderFrontRegardless()`：
-                // 对一个已经最前的窗口重复做排序，偶尔会让 AppKit 投递虚假的
-                // `mouseExited`/`mouseEntered`，导致 egui-winit 内部的光标图标缓存
-                // 被清空，要等下一次真实鼠标移动才纠正回手型光标——表现为"刚打开
-                // 窗口那一下,鼠标移进按钮不能很快变手型,但确实可以点"。`activate()`
-                // 仍然每帧都调，`ACTIVATE_FRAMES` 帧数不变，不影响 macOS 14+ 下
-                // 抢焦点需要连续几帧才稳的既有结论；只是同一个窗口一旦已经是
-                // key window 就不再多余地重排它。
-                if !win.isKeyWindow() {
-                    win.orderFrontRegardless();
-                }
+            converged = false;
+        }
+        let windows = app.windows();
+        let count = windows.count();
+        for i in 0..count {
+            let win = windows.objectAtIndex(i);
+            // 已经是最前、拿到焦点的 key window 时跳过 `orderFrontRegardless()`：
+            // 对一个已经最前的窗口重复做排序，偶尔会让 AppKit 投递虚假的
+            // `mouseExited`/`mouseEntered`，导致 egui-winit 内部的光标图标缓存
+            // 被清空，要等下一次真实鼠标移动才纠正回手型光标——表现为"刚打开
+            // 窗口那一下,鼠标移进按钮不能很快变手型,但确实可以点"。同一个窗口
+            // 一旦已经是 key window 就不再多余地重排它。
+            if !win.isKeyWindow() {
+                win.orderFrontRegardless();
+                converged = false;
             }
         }
+        converged
     }
 
     /// wakeup 线程调用：macOS 的 NSApplication/NSWindow API 必须在主线程调用，
@@ -158,10 +181,21 @@ mod imp {
     /// 从 UI 线程（`logic`）调用：作为 `set_foreground` 的兜底。窗口已由
     /// `Visible(true)` 显示但可能仍不在前台时，用 `AttachThreadInput` 绕过
     /// 前台锁定把窗口拉到最前。
-    pub fn bring_to_front() {
+    ///
+    /// 返回值同 macOS 侧：`true` 表示这一帧发现窗口本来就已经是前台窗口，没做任何
+    /// 纠正动作，调用方可以据此提前把 `activate_countdown` 清零；`false` 表示刚
+    /// 调了 `SetForegroundWindow`，状态还没确认稳定，下一帧要再检查一次。
+    pub fn bring_to_front() -> bool {
         unsafe {
-            let pid = GetCurrentProcessId();
-            let _ = EnumWindows(Some(raise_proc), LPARAM(pid as isize));
+            // `lparam` 这个字长的参数只够传一个东西：原来传 pid 用来在回调里过滤窗口，
+            // 现在改成传"结果 bool"的指针，pid 过滤挪到 `raise_proc` 内部自己现查
+            // `GetCurrentProcessId()`（这本身就是个廉价调用，不必从外面传进来）。
+            let mut converged = false;
+            let _ = EnumWindows(
+                Some(raise_proc),
+                LPARAM(&mut converged as *mut bool as isize),
+            );
+            converged
         }
     }
 
@@ -182,16 +216,18 @@ mod imp {
         }
     }
 
-    /// `bring_to_front` 的枚举回调：找到本进程第一个顶层窗口就 `raise_window` 并停止。
+    /// `bring_to_front` 的枚举回调：找到本进程第一个顶层窗口就 `raise_window` 并停止，
+    /// 把"是否已经是前台窗口、无需纠正"的结果写回 `lparam` 指向的 `bool`。
     unsafe extern "system" fn raise_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         unsafe {
-            let target_pid = lparam.0 as u32;
+            let target_pid = GetCurrentProcessId();
             let mut window_pid: u32 = 0;
             let _tid = GetWindowThreadProcessId(hwnd, Some(&mut window_pid));
             if window_pid != target_pid {
                 return BOOL(1); // 不是本进程的窗口 → 继续枚举
             }
-            raise_window(hwnd);
+            let converged = &mut *(lparam.0 as *mut bool);
+            *converged = raise_window(hwnd);
             BOOL(0) // 已找到 → 停止枚举
         }
     }
@@ -199,11 +235,15 @@ mod imp {
     /// 单个窗口的置顶逻辑：AttachThreadInput → BringWindowToTop → SetForegroundWindow。
     /// 不调 `ShowWindow(SW_RESTORE)`——窗口可见性由 winit/egui 管理（`Visible(true)`），
     /// 自行 `ShowWindow` 会让 winit 的窗口状态缓存失真。
-    unsafe fn raise_window(hwnd: HWND) {
+    ///
+    /// 返回 `true` 表示窗口在调用前就已经是前台窗口（无需任何动作）；返回 `false`
+    /// 表示刚做了 `SetForegroundWindow` 纠正，是否真的生效要等下一帧再确认——
+    /// `SetForegroundWindow` 的返回值本身不够可靠，不能拿它当"已收敛"的证据。
+    unsafe fn raise_window(hwnd: HWND) -> bool {
         unsafe {
             let foreground = GetForegroundWindow();
             if foreground == hwnd {
-                return; // 已是前台窗口
+                return true; // 已是前台窗口，这一帧不需要任何动作
             }
             // AttachThreadInput 把当前线程的输入队列临时与前台线程的 attach 在一起，
             // 绕过"只有前台进程才能 SetForegroundWindow"的限制。
@@ -222,6 +262,7 @@ mod imp {
             if attached {
                 let _ = AttachThreadInput(our_tid, fg_tid, false);
             }
+            false
         }
     }
 }
@@ -238,7 +279,10 @@ mod imp {
         true
     }
     pub fn set_foreground() {}
-    pub fn bring_to_front() {}
+    // no-op：本来就没有需要纠正的窗口置顶状态，直接算"已收敛"。
+    pub fn bring_to_front() -> bool {
+        true
+    }
 }
 
 #[allow(unused_imports)]

@@ -455,10 +455,22 @@ impl eframe::App for App {
         // 这里再做一次兜底），绝不能继续 `bring_to_front()`——`orderFrontRegardless()`
         // 会强制把已 orderOut 的 NSWindow 重新可见，覆盖刚发出的 `Visible(false)`，
         // 同时 `request_repaint_after(30ms)` 会因倒计数不清零而持续触发，造成闲置 CPU。
+        //
+        // `bring_to_front()` 返回 `true` 表示这一帧发现窗口/App 状态本来就已经符合
+        // 预期、没做任何纠正动作——大多数"窗口本来就可见、只是被别的 App 遮挡后切回
+        // 前台"的场景，第一帧就会是这个结果，此时提前把倒计时清零，不必再空转到
+        // `ACTIVATE_FRAMES`：既少打若干次 `activate()`/`orderFrontRegardless()`
+        // （避免跟系统自己的应用切换动画抢主线程，参见 macos_reopen.rs 里的说明），
+        // 也少维持几十到几百毫秒的 30ms 高频重绘。真正需要多帧才能稳定置顶的场景
+        // （托盘唤回、从最小化恢复）里，只要有一帧仍在做纠正动作就会返回 `false`，
+        // 倒计时照常一帧一帧退，行为跟之前一样，不会退化。
         if self.activate_countdown > 0 {
             if !self.window_hidden {
-                crate::macos_reopen::bring_to_front();
-                self.activate_countdown -= 1;
+                if crate::macos_reopen::bring_to_front() {
+                    self.activate_countdown = 0;
+                } else {
+                    self.activate_countdown -= 1;
+                }
             } else {
                 self.activate_countdown = 0;
             }
