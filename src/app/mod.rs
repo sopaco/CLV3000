@@ -410,6 +410,18 @@ impl Drop for App {
 }
 
 impl eframe::App for App {
+    /// eframe 默认 `clear_color` 是近黑、半透明的 `(12,12,12,180)`（为"窗口阴影在
+    /// 浅色系统主题下不显得怪"设计），本项目从不需要透明窗口。只要有一帧内容没有
+    /// 铺满整个视口——比如「关于」独占窗口关闭时 `reconcile_lifecycle` 发出的原生
+    /// `InnerSize` 尺寸跳变（新增区域要等下一帧才补画主界面）、或托盘隐藏/唤回时
+    /// `Visible` 指令与实际渲染之间那几帧竞态窗口——GPU 露出来的就是这个 clear
+    /// color，肉眼看就是"关闭时黑一下"。显式覆盖成本项目自己的不透明背景
+    /// `colors::BG_APP` 后，即使真的撞上这类未铺满的空档帧，露出来的颜色也跟正常
+    /// 页面背景完全一致，视觉上不会显得"跳"了一下。
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        colors::BG_APP.to_normalized_gamma_f32()
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_tray();
 

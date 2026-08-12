@@ -94,7 +94,17 @@ mod imp {
             let count = windows.count();
             for i in 0..count {
                 let win = windows.objectAtIndex(i);
-                win.orderFrontRegardless();
+                // 已经是最前、拿到焦点的 key window 时跳过 `orderFrontRegardless()`：
+                // 对一个已经最前的窗口重复做排序，偶尔会让 AppKit 投递虚假的
+                // `mouseExited`/`mouseEntered`，导致 egui-winit 内部的光标图标缓存
+                // 被清空，要等下一次真实鼠标移动才纠正回手型光标——表现为"刚打开
+                // 窗口那一下,鼠标移进按钮不能很快变手型,但确实可以点"。`activate()`
+                // 仍然每帧都调，`ACTIVATE_FRAMES` 帧数不变，不影响 macOS 14+ 下
+                // 抢焦点需要连续几帧才稳的既有结论；只是同一个窗口一旦已经是
+                // key window 就不再多余地重排它。
+                if !win.isKeyWindow() {
+                    win.orderFrontRegardless();
+                }
             }
         }
     }
