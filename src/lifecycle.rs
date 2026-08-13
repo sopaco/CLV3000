@@ -5,7 +5,10 @@
 /// Windows 上 `--tray-only` 启动时，`main` 会在 eframe 之外空等托盘事件
 /// （`wait_in_tray`），完全不创建窗口——既不闪窗、也不占用 OpenGL 上下文内存。
 /// 用户从托盘请求显示窗口/关于/闪电扫描时才启动 eframe，并按此模式初始化。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `ScanPath` 带一个路径数据，所以这个枚举去掉了 `Copy`（其它几个变体不受影响，
+/// 按值 `match` 时只要模式里不绑定字段就不会移动，见 `app/mod.rs::App::new`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InitialMode {
     /// 直接显示主窗口。
     ShowWindow,
@@ -17,6 +20,10 @@ pub enum InitialMode {
     QuickScan,
     /// 启动并直接显示「关于」独占窗口（来自托盘）。
     About,
+    /// 启动并直接扫描给定的单个文件/文件夹——来自 `--scan-path` 命令行参数
+    /// （右键菜单"用 CLV3000 扫描"触发的冷启动），或已有实例在跑时通过
+    /// `single_instance` 转发过来的扫描请求（见 `wakeup::scan_requests`）。
+    ScanPath(std::path::PathBuf),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,4 +65,24 @@ impl Lifecycle {
 /// 解析命令行：支持 `--tray-only` / `--tray` 启动后只显示托盘。
 pub fn parse_start_tray_only() -> bool {
     std::env::args().any(|a| a == "--tray-only" || a == "--tray")
+}
+
+/// 解析命令行：支持 `--scan-path=<path>` 和 `--scan-path <path>`（下一个参数）
+/// 两种写法——Windows 右键菜单的 `command` 值用 `"<exe>" --scan-path "%1"`（后者），
+/// 手动命令行调试用等号写法更方便，两种都认。只取第一次出现的一个，多个
+/// `--scan-path` 没有意义。
+pub fn parse_scan_path() -> Option<std::path::PathBuf> {
+    let args: Vec<String> = std::env::args().collect();
+    for (i, arg) in args.iter().enumerate() {
+        if let Some(path) = arg.strip_prefix("--scan-path=") {
+            if !path.is_empty() {
+                return Some(std::path::PathBuf::from(path));
+            }
+        } else if arg == "--scan-path" {
+            if let Some(next) = args.get(i + 1) {
+                return Some(std::path::PathBuf::from(next));
+            }
+        }
+    }
+    None
 }

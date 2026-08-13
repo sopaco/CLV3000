@@ -125,6 +125,34 @@ impl ScanPageState {
         }
     }
 
+    /// 跟 `start()` 几乎一样，只是扫描目标从"枚举出来的一大批路径"换成"用户指定
+    /// 的单个文件/文件夹"——右键菜单"用 CLV3000 扫描"/`--scan-path` 触发（见
+    /// `App::begin_path_scan`）。只在 `full`（kind=Full）状态上调用：复用现成的
+    /// 全盘扫描页面渲染，进度环/威胁列表/Done 态都已经支持"total 未知"和"任意
+    /// 威胁列表"，不用新造一套 UI。
+    pub(crate) fn start_path(&mut self, target: std::path::PathBuf) {
+        if self.is_running() {
+            return;
+        }
+        self.threats.clear();
+        self.last_error = None;
+        self.started_at = Some(Instant::now());
+        self.engine_loading = false;
+        self.engine_loading_remaining = 0;
+        self.walk_files_found = 0;
+        self.engine_scanning_path = None;
+        let cancel = scan::new_cancel_flag();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.cancel = Some(cancel.clone());
+        self.rx = Some(rx);
+        self.phase = ScanPhase::Scanning {
+            total: None,
+            scanned: 0,
+            current_path: String::new(),
+        };
+        std::thread::spawn(move || scan::full_scan::run_single_target(tx, cancel, target));
+    }
+
     pub(crate) fn request_cancel(&self) {
         if let Some(c) = &self.cancel {
             c.store(true, Ordering::SeqCst);
@@ -392,6 +420,37 @@ impl VirusDbState {
     }
 }
 
+/// 设置页两个 tab：隔离区/忽略列表管理，和一个统一的"应用与引擎设置"（自启动+
+/// 右键菜单，未来同类的应用级开关也归这里，不再按功能各开一个 tab）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsTab {
+    QuarantineIgnore,
+    General,
+}
+
+/// 设置页跨帧状态：当前 tab + 自启动/右键菜单的懒探测缓存（跟
+/// `VirusDbState::engine_probe` 同一个模式——真的碰文件系统/注册表只在首次
+/// 渲染或用户操作后失效重探时做一次，其余帧直接读缓存）。
+pub(crate) struct SettingsState {
+    pub(crate) tab: SettingsTab,
+    pub(crate) autostart_enabled: Option<bool>,
+    /// 只在 Windows 上被 `app/settings.rs` 的 `#[cfg(windows)]` 分支读写——右键
+    /// 菜单功能仅 Windows 实现（已与用户确认，见计划文档）。非 Windows 编译目标
+    /// 上这是预期内的 dead code。
+    #[allow(dead_code)]
+    pub(crate) context_menu_enabled: Option<bool>,
+}
+
+impl SettingsState {
+    fn new() -> Self {
+        Self {
+            tab: SettingsTab::QuarantineIgnore,
+            autostart_enabled: None,
+            context_menu_enabled: None,
+        }
+    }
+}
+
 /// 跨帧保留的业务状态（配置、扫描、页面路由）。纯托盘模式下也存在。
 pub(crate) struct AppCore {
     pub(crate) page: Page,
@@ -399,6 +458,7 @@ pub(crate) struct AppCore {
     pub(crate) quick: ScanPageState,
     pub(crate) full: ScanPageState,
     pub(crate) virus_db: VirusDbState,
+    pub(crate) settings: SettingsState,
     pub(crate) dashboard_content_height: f32,
 }
 
@@ -410,6 +470,7 @@ impl AppCore {
             quick: ScanPageState::new(ScanKind::Quick),
             full: ScanPageState::new(ScanKind::Full),
             virus_db: VirusDbState::new(),
+            settings: SettingsState::new(),
             dashboard_content_height: 0.0,
         }
     }

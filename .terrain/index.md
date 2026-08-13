@@ -42,8 +42,10 @@ source: .
     - codegraph.db
     - .gitignore
   - src/
+    - autostart.rs
     - icons.rs
     - app/
+    - context_menu.rs
     - config.rs
     - icon_data.rs
     - sysmon.rs
@@ -58,5 +60,6 @@ source: .
     - localtime.rs
     - main.rs
     - lifecycle.rs
+    - quarantine.rs
     - widgets.rs
     - single_instance.rs

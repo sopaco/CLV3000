@@ -19,6 +19,7 @@
 
 use egui::Context;
 use muda::MenuEvent;
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock, mpsc};
 use tray_icon::TrayIconEvent;
 
@@ -32,6 +33,12 @@ static TRAY_EVENTS: OnceLock<(mpsc::Sender<TrayIconEvent>, Mutex<mpsc::Receiver<
     OnceLock::new();
 static MENU_EVENTS: OnceLock<(mpsc::Sender<MenuEvent>, Mutex<mpsc::Receiver<MenuEvent>>)> =
     OnceLock::new();
+/// 右键菜单"用 CLV3000 扫描"/`--scan-path` 冷启动转发过来的扫描请求（见
+/// `single_instance::forward_scan_request`）。跟托盘/菜单事件同一套"全局队列 +
+/// ping()"机制：`main::wait_in_tray`（Windows tray-only、eframe 还没启动）和
+/// `App::logic`（eframe 已启动）都从这里排空，不用关心当前是不是已经进了 eframe。
+static SCAN_REQUESTS: OnceLock<(mpsc::Sender<PathBuf>, Mutex<mpsc::Receiver<PathBuf>>)> =
+    OnceLock::new();
 
 /// 起两条转发线程（幂等，重复调用直接返回）。必须在 `main` 开头、托盘创建之前调用。
 pub fn init() {
@@ -42,6 +49,8 @@ pub fn init() {
     let _ = TRAY_EVENTS.set((tray_tx, Mutex::new(tray_rx)));
     let (menu_tx, menu_rx) = mpsc::channel();
     let _ = MENU_EVENTS.set((menu_tx, Mutex::new(menu_rx)));
+    let (scan_tx, scan_rx) = mpsc::channel();
+    let _ = SCAN_REQUESTS.set((scan_tx, Mutex::new(scan_rx)));
 
     // 托盘图标事件（双击等）。
     std::thread::spawn(|| {
@@ -109,4 +118,18 @@ pub fn tray_events() -> &'static Mutex<mpsc::Receiver<TrayIconEvent>> {
 /// UI 帧里轮询托盘菜单事件（替代直接读 `MenuEvent::receiver()`）。
 pub fn menu_events() -> &'static Mutex<mpsc::Receiver<MenuEvent>> {
     &MENU_EVENTS.get().expect("wakeup::init not called").1
+}
+
+/// 由 `single_instance` 的转发监听线程调用：把收到的扫描请求推进队列并唤醒 UI
+/// （若当前有 eframe 会话在跑；没有的话事件留在队列里，`wait_in_tray` 会自己排空）。
+pub fn push_scan_request(path: PathBuf) {
+    if let Some((tx, _)) = SCAN_REQUESTS.get() {
+        let _ = tx.send(path);
+        ping();
+    }
+}
+
+/// UI 帧 / `wait_in_tray` 里轮询转发过来的扫描请求。
+pub fn scan_requests() -> &'static Mutex<mpsc::Receiver<PathBuf>> {
+    &SCAN_REQUESTS.get().expect("wakeup::init not called").1
 }

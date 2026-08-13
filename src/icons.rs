@@ -3,7 +3,7 @@
 //!
 //! 所有函数都在 `rect` 范围内按统一比例作画，`rect` 建议传正方形。
 
-use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, epaint::PathStroke};
+use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2, epaint::PathStroke};
 
 fn map(rect: Rect, u: f32, v: f32) -> Pos2 {
     Pos2::new(
@@ -222,6 +222,26 @@ pub fn folder(painter: &Painter, rect: Rect, stroke: Stroke) {
     .map(|&(u, v)| map(rect, u, v))
     .collect();
     painter.add(polyline(&pts, stroke, true));
+}
+
+/// 齿轮图标：一个圆环 + 圆周若干短齿 + 中心一个小圆，侧栏"设置"入口用。风格跟
+/// `database`/`folder` 一致（描边为主），齿的数量/长度取一个视觉上不空、不挤的
+/// 中间值（8 颗，比手表齿轮稀疏但比时钟指示密，正方形画布内旋转对称）。
+pub fn gear(painter: &Painter, rect: Rect, stroke: Stroke) {
+    let center = rect.center();
+    let ring_r = rect.width() * 0.30;
+    painter.circle_stroke(center, ring_r, stroke);
+    painter.circle_stroke(center, rect.width() * 0.10, stroke);
+
+    const TEETH: usize = 8;
+    let tooth_len = rect.width() * 0.14;
+    for i in 0..TEETH {
+        let angle = std::f32::consts::TAU * i as f32 / TEETH as f32;
+        let (sin, cos) = angle.sin_cos();
+        let inner = center + Vec2::new(cos, sin) * ring_r;
+        let outer = center + Vec2::new(cos, sin) * (ring_r + tooth_len);
+        painter.line_segment([inner, outer], stroke);
+    }
 }
 
 /// 标题栏"最小化"按钮图标：一条横线（仅 macOS 自绘标题栏使用）。

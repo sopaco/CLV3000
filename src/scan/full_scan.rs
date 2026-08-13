@@ -145,11 +145,82 @@ pub fn run(tx: Sender<ScanEvent>, cancel: CancelFlag, include_removable: bool) {
     engine::run(source, tx, cancel);
 }
 
+/// 扫描一个用户指定的单个文件或文件夹——右键菜单"用 CLV3000 扫描"/
+/// `--scan-path` 命令行参数触发（见 `lifecycle::parse_scan_path`），不是全盘。
+/// 阻塞执行，调用者需要自己 spawn 一个线程来跑它（跟 `run` 一致）。
+pub fn run_single_target(tx: Sender<ScanEvent>, cancel: CancelFlag, target: std::path::PathBuf) {
+    let start = Instant::now();
+
+    if !target.exists() {
+        let _ = tx.send(ScanEvent::Error(format!(
+            "Path not found: {}",
+            target.display()
+        )));
+        let _ = tx.send(ScanEvent::Finished {
+            scanned: 0,
+            elapsed: start.elapsed(),
+            cancelled: false,
+        });
+        return;
+    }
+
+    // 单个文件：不用 walk，直接扔给引擎；只有目录才需要遍历收集可执行文件。
+    let (source, total_files) = if target.is_file() {
+        (PathSource::InMemory(vec![target]), 1)
+    } else {
+        #[cfg(windows)]
+        {
+            let (path, count) = real_windows::walk_single(&tx, &cancel, &target);
+            (PathSource::File { path, count }, count)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let (path, count) = real_macos::walk_single(&tx, &cancel, &target);
+            (PathSource::File { path, count }, count)
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        {
+            let paths = mock::walk_single_dir(&target);
+            let count = paths.len();
+            (PathSource::InMemory(paths), count)
+        }
+    };
+
+    if cancel.load(Ordering::SeqCst) {
+        if let PathSource::File { path, .. } = &source {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = tx.send(ScanEvent::Finished {
+            scanned: 0,
+            elapsed: start.elapsed(),
+            cancelled: true,
+        });
+        return;
+    }
+
+    if total_files == 0 {
+        if let PathSource::File { path, .. } = &source {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = tx.send(ScanEvent::Finished {
+            scanned: 0,
+            elapsed: start.elapsed(),
+            cancelled: false,
+        });
+        return;
+    }
+
+    let _ = tx.send(ScanEvent::ScanStarted {
+        total: Some(total_files),
+    });
+    engine::run(source, tx, cancel);
+}
+
 #[cfg(windows)]
 mod real_windows {
     use super::CancelFlag;
     use super::{report_walk_progress, ScanEvent, WalkListWriter};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering;
     use std::sync::mpsc::Sender;
     use walkdir::WalkDir;
@@ -162,6 +233,37 @@ mod real_windows {
     const DRIVE_FIXED: u32 = 3;
     const DRIVE_REMOVABLE: u32 = 2;
 
+    /// 遍历单个根目录，把匹配白名单扩展名的文件边发现边写进 `writer`。返回
+    /// `false` 表示中途被取消（调用者应停止遍历更多 root）。被
+    /// `walk`（多盘循环）和 `walk_single`（右键菜单扫指定文件夹）共用，避免
+    /// 两处各写一份几乎一样的 `WalkDir` 遍历逻辑。
+    fn walk_root(
+        root: &Path,
+        writer: &mut WalkListWriter,
+        tx: &Sender<ScanEvent>,
+        cancel: &CancelFlag,
+        last_reported: &mut usize,
+    ) -> bool {
+        for entry in WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if cancel.load(Ordering::SeqCst) {
+                return false;
+            }
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            if !has_executable_extension(entry.path()) {
+                continue;
+            }
+            writer.push(entry.path());
+            report_walk_progress(tx, writer.count, last_reported);
+        }
+        true
+    }
+
     /// 遍历本地磁盘，把匹配白名单扩展名的文件路径边发现边写入临时列表文件。
     /// 返回 (临时文件路径, 条数)。
     pub fn walk(
@@ -173,25 +275,25 @@ mod real_windows {
         let mut writer = WalkListWriter::create();
         let mut last_reported = 0usize;
 
-        'roots: for root in roots {
-            for entry in WalkDir::new(&root)
-                .follow_links(false)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
-                if cancel.load(Ordering::SeqCst) {
-                    break 'roots;
-                }
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                if !has_executable_extension(entry.path()) {
-                    continue;
-                }
-                writer.push(entry.path());
-                report_walk_progress(tx, writer.count, &mut last_reported);
+        for root in roots {
+            if !walk_root(&root, &mut writer, tx, cancel, &mut last_reported) {
+                break;
             }
         }
+        report_walk_progress(tx, writer.count, &mut last_reported);
+        writer.finish()
+    }
+
+    /// 右键菜单"用 CLV3000 扫描"/`--scan-path` 指定的单个文件夹：只遍历这一个
+    /// 根目录，不枚举磁盘。返回 (临时文件路径, 条数)。
+    pub fn walk_single(
+        tx: &Sender<ScanEvent>,
+        cancel: &CancelFlag,
+        target: &Path,
+    ) -> (PathBuf, usize) {
+        let mut writer = WalkListWriter::create();
+        let mut last_reported = 0usize;
+        walk_root(target, &mut writer, tx, cancel, &mut last_reported);
         report_walk_progress(tx, writer.count, &mut last_reported);
         writer.finish()
     }
@@ -240,7 +342,7 @@ mod real_windows {
 mod real_macos {
     use super::CancelFlag;
     use super::{report_walk_progress, ScanEvent, WalkListWriter};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering;
     use std::sync::mpsc::Sender;
     use walkdir::WalkDir;
@@ -258,13 +360,51 @@ mod real_macos {
         "log", "db", "sqlite", "sqlite3",
     ];
 
-    /// 遍历挂载点，把匹配的 Mach-O 可执行文件路径边发现边写入临时列表文件。
-    /// 返回 (临时文件路径, 条数)。
+    /// 遍历单个根目录，把匹配的 Mach-O 可执行文件边发现边写进 `writer`。返回
+    /// `false` 表示中途被取消。被 `walk`（多盘循环）和 `walk_single`（右键菜单/
+    /// `--scan-path` 扫指定文件/文件夹）共用。
     ///
     /// 用 `filter_entry` 而不是"进了子树再逐个 entry 判断丢弃"：后者对
     /// `/System/Volumes` 这类整棵子树都要跳过的目录，WalkDir 仍会完整下降进去、
     /// 对每个文件都 stat 一遍，只是最后不收进结果——等于把这块子树白走了一遍。
     /// `filter_entry` 在返回 `false` 时直接不下降这个目录，整棵子树被剪掉。
+    /// `include_removable`：只有遍历磁盘根（`/`）时才需要靠这个排除 `/Volumes`；
+    /// 单目标遍历传 `true`，反正目标本身就是用户显式选中的目录，不该二次过滤。
+    fn walk_root(
+        root: &Path,
+        include_removable: bool,
+        writer: &mut WalkListWriter,
+        tx: &Sender<ScanEvent>,
+        cancel: &CancelFlag,
+        last_reported: &mut usize,
+    ) -> bool {
+        let walker = WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| !is_excluded(e.path(), include_removable));
+        for entry in walker.filter_map(|e| e.ok()) {
+            if cancel.load(Ordering::SeqCst) {
+                return false;
+            }
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if has_never_executable_extension(path) {
+                continue;
+            }
+            // 实时读文件头判断是不是 Mach-O，避免把数百万个普通文件都塞进待扫列表。
+            if !super::super::is_macho_file(path) {
+                continue;
+            }
+            writer.push(path);
+            report_walk_progress(tx, writer.count, last_reported);
+        }
+        true
+    }
+
+    /// 遍历挂载点，把匹配的 Mach-O 可执行文件路径边发现边写入临时列表文件。
+    /// 返回 (临时文件路径, 条数)。
     pub fn walk(
         tx: &Sender<ScanEvent>,
         cancel: &CancelFlag,
@@ -274,30 +414,25 @@ mod real_macos {
         let mut writer = WalkListWriter::create();
         let mut last_reported = 0usize;
 
-        'roots: for root in roots {
-            let walker = WalkDir::new(&root)
-                .follow_links(false)
-                .into_iter()
-                .filter_entry(|e| !is_excluded(e.path(), include_removable));
-            for entry in walker.filter_map(|e| e.ok()) {
-                if cancel.load(Ordering::SeqCst) {
-                    break 'roots;
-                }
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let path = entry.path();
-                if has_never_executable_extension(path) {
-                    continue;
-                }
-                // 实时读文件头判断是不是 Mach-O，避免把数百万个普通文件都塞进待扫列表。
-                if !super::super::is_macho_file(path) {
-                    continue;
-                }
-                writer.push(path);
-                report_walk_progress(tx, writer.count, &mut last_reported);
+        for root in roots {
+            if !walk_root(&root, include_removable, &mut writer, tx, cancel, &mut last_reported) {
+                break;
             }
         }
+        report_walk_progress(tx, writer.count, &mut last_reported);
+        writer.finish()
+    }
+
+    /// 右键菜单"用 CLV3000 扫描"/`--scan-path` 指定的单个文件夹：只遍历这一个
+    /// 根目录，不枚举挂载点。返回 (临时文件路径, 条数)。
+    pub fn walk_single(
+        tx: &Sender<ScanEvent>,
+        cancel: &CancelFlag,
+        target: &Path,
+    ) -> (PathBuf, usize) {
+        let mut writer = WalkListWriter::create();
+        let mut last_reported = 0usize;
+        walk_root(target, true, &mut writer, tx, cancel, &mut last_reported);
         report_walk_progress(tx, writer.count, &mut last_reported);
         writer.finish()
     }
@@ -399,5 +534,14 @@ mod mock {
         }
         report_walk_progress(tx, paths.len(), &mut last_reported);
         paths
+    }
+
+    /// 开发预览用：右键菜单/`--scan-path` 扫一个目录时，假装在里面找到几个
+    /// "可疑"文件——不真的碰文件系统，只是让这条路径在预览环境里也能点通。
+    pub fn walk_single_dir(target: &std::path::Path) -> Vec<PathBuf> {
+        vec![
+            target.join("suspicious_tool.exe"),
+            target.join("subdir").join("payload.dll"),
+        ]
     }
 }

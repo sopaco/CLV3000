@@ -246,8 +246,9 @@ pub enum ThreatAction {
 /// 威胁卡片上"隔离"/"忽略"用的小胶囊按钮。不用 `egui::Button` 是因为想让两个按钮
 /// 的尺寸/圆角/居中方式完全统一可控（`egui::Button` 默认样式在深色红卡片背景上
 /// 对比度不太对，两个按钮风格也不一致）。`filled=true` 是红底白字的"隔离"，
-/// `filled=false` 是描边的"忽略"。
-fn pill_button(ui: &mut Ui, label: &str, filled: bool) -> bool {
+/// `filled=false` 是描边的"忽略"。`pub(crate)`：设置页（`app/settings.rs`）的
+/// "还原/删除/移除"按钮复用同一套样式，不重新造一套。
+pub(crate) fn pill_button(ui: &mut Ui, label: &str, filled: bool) -> bool {
     const H_PAD: f32 = 14.0;
     const V_PAD: f32 = 7.0;
 
@@ -355,7 +356,8 @@ pub fn threat_card(ui: &mut Ui, virus_name: &str, path: &str) -> ThreatAction {
     action
 }
 
-fn truncate_middle(s: &str, max_chars: usize) -> String {
+/// `pub(crate)`：设置页的隔离区/忽略列表也要截断长路径，复用这份实现。
+pub(crate) fn truncate_middle(s: &str, max_chars: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() <= max_chars {
         return s.to_string();

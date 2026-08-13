@@ -142,6 +142,10 @@ pub(super) fn sidebar(ui: &mut egui::Ui, _ctx: &egui::Context, app: &mut App) {
             page: Page::VirusDb,
             draw: |p, r, s| icons::database(p, r, s),
         },
+        SidebarItem {
+            page: Page::Settings,
+            draw: |p, r, s| icons::gear(p, r, s),
+        },
     ];
 
     for item in items {

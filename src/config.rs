@@ -19,12 +19,25 @@ pub struct IgnoredEntry {
     pub virus_name: String,
 }
 
+/// 隔离区里的一条记录：原始路径 + 病毒名 + 隔离时间 + 隔离区里实际的文件名
+/// （`stored_name`，不含目录，配合 `paths::quarantine_dir()` 定位真实文件，见 `quarantine.rs`）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuarantineEntry {
+    pub original_path: String,
+    pub virus_name: String,
+    pub quarantined_at: Timestamp,
+    pub stored_name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     pub last_quick_scan: Option<ScanRecord>,
     pub last_full_scan: Option<ScanRecord>,
     #[serde(default)]
     pub ignored: Vec<IgnoredEntry>,
+    /// 已隔离的威胁文件记录，设置页「Quarantine」tab 用来渲染列表 + 支持还原/删除。
+    #[serde(default)]
+    pub quarantined: Vec<QuarantineEntry>,
     /// 全盘扫描是否包含可移动盘（U盘等），默认不包含，避免扫描时间不可控。
     #[serde(default)]
     pub scan_removable_drives: bool,
@@ -59,5 +72,30 @@ impl AppConfig {
             self.ignored.push(entry);
         }
         self.save();
+    }
+
+    /// 设置页「Ignored」列表的"移除"按钮用：把某条忽略记录删掉，下次扫描到同一
+    /// 文件路径 + 同一病毒名会重新报出来。
+    pub fn remove_ignored(&mut self, path: &str, virus_name: &str) {
+        self.ignored
+            .retain(|e| !(e.path == path && e.virus_name == virus_name));
+        self.save();
+    }
+
+    pub fn add_quarantined(&mut self, entry: QuarantineEntry) {
+        self.quarantined.push(entry);
+        self.save();
+    }
+
+    /// 按 `stored_name`（隔离区里的实际文件名，唯一）移除一条隔离记录并落盘；
+    /// 返回被移除的记录，供调用者（还原/彻底删除）拿到 `original_path` 等字段。
+    pub fn remove_quarantined(&mut self, stored_name: &str) -> Option<QuarantineEntry> {
+        let idx = self
+            .quarantined
+            .iter()
+            .position(|e| e.stored_name == stored_name)?;
+        let entry = self.quarantined.remove(idx);
+        self.save();
+        Some(entry)
     }
 }
