@@ -61,6 +61,19 @@ pub(crate) struct ScanPageState {
     pub(crate) walk_files_found: usize,
     /// clamscan `-v` 的 `Scanning <path>` 行：当前正在引擎内检测的文件。
     pub(crate) engine_scanning_path: Option<String>,
+    /// 普通隔离失败后，等待用户确认是否强制隔离。对话框期间存住威胁信息，
+    /// 用户点"确认"→ 起后台线程跑 `force_quarantine_file`；点"取消"→ 清空、回到威胁列表。
+    pub(crate) pending_force_quarantine: Option<PendingForceQuarantine>,
+    /// 强制隔离后台线程的结果回传通道。`Some` 表示线程在跑，每帧 `try_recv` 轮询。
+    force_quarantine_rx: Option<Receiver<Result<crate::config::QuarantineEntry, String>>>,
+    /// 正在强制隔离的威胁文件路径（用于后台线程完成后从 `threats` 里按路径找到并移除）。
+    force_quarantine_path: Option<PathBuf>,
+}
+
+/// 待确认的强制隔离请求——普通隔离失败后弹出确认对话框用。
+pub(crate) struct PendingForceQuarantine {
+    pub(crate) path: PathBuf,
+    pub(crate) virus_name: String,
 }
 
 impl ScanPageState {
@@ -78,6 +91,9 @@ impl ScanPageState {
             engine_loading_remaining: 0,
             walk_files_found: 0,
             engine_scanning_path: None,
+            pending_force_quarantine: None,
+            force_quarantine_rx: None,
+            force_quarantine_path: None,
         }
     }
 
@@ -157,6 +173,60 @@ impl ScanPageState {
         if let Some(c) = &self.cancel {
             c.store(true, Ordering::SeqCst);
         }
+    }
+
+    /// 用户确认强制隔离后，起后台线程执行 `force_quarantine_file`。
+    /// 结果经 channel 回传，由 `poll_force_quarantine` 每帧轮询。
+    #[cfg(windows)]
+    pub(crate) fn start_force_quarantine(
+        &mut self,
+        ctx: &egui::Context,
+        pending: PendingForceQuarantine,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.force_quarantine_rx = Some(rx);
+        self.force_quarantine_path = Some(pending.path.clone());
+        self.pending_force_quarantine = None;
+        let path = pending.path.clone();
+        let virus_name = pending.virus_name.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = crate::quarantine::force_quarantine_file(&path, &virus_name);
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+    }
+
+    /// 每帧轮询强制隔离后台线程的结果。成功时返回 `(QuarantineEntry, PathBuf)`，
+    /// 调用者负责把 entry 写入 config、按 path 从 threats 里移除。
+    #[cfg(windows)]
+    pub(crate) fn poll_force_quarantine(
+        &mut self,
+    ) -> Option<Result<(crate::config::QuarantineEntry, PathBuf), String>> {
+        let rx = self.force_quarantine_rx.as_ref()?;
+        match rx.try_recv() {
+            Ok(Ok(entry)) => {
+                let path = self.force_quarantine_path.take();
+                self.force_quarantine_rx = None;
+                Some(Ok((entry, path.unwrap_or_default())))
+            }
+            Ok(Err(e)) => {
+                self.force_quarantine_rx = None;
+                self.force_quarantine_path = None;
+                Some(Err(e))
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.force_quarantine_rx = None;
+                self.force_quarantine_path = None;
+                Some(Err("Force quarantine thread stopped unexpectedly".to_string()))
+            }
+        }
+    }
+
+    /// 强制隔离是否正在后台执行（用于 UI 显示"处理中"状态）。
+    pub(crate) fn is_force_quarantining(&self) -> bool {
+        self.force_quarantine_rx.is_some()
     }
 
     /// 返回 `Some((scanned, elapsed, cancelled))` 当这一批事件里出现了 `Finished`。

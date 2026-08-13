@@ -139,8 +139,14 @@ pub fn progress_ring(
         }
     }
 
+    // 有副标题时标题上移，给副标题留空间；无副标题时标题居中。
+    let title_y = if center_sub.is_empty() {
+        0.0
+    } else {
+        -diameter * 0.04
+    };
     painter.text(
-        center + Vec2::new(0.0, -diameter * 0.04),
+        center + Vec2::new(0.0, title_y),
         Align2::CENTER_CENTER,
         center_title,
         FontId::proportional(diameter * 0.16),
@@ -148,7 +154,7 @@ pub fn progress_ring(
     );
     if !center_sub.is_empty() {
         painter.text(
-            center + Vec2::new(0.0, diameter * 0.16),
+            center + Vec2::new(0.0, diameter * 0.09),
             Align2::CENTER_CENTER,
             center_sub,
             FontId::proportional(diameter * 0.055),
