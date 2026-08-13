@@ -32,10 +32,14 @@ pub(super) fn settings_page(ui: &mut egui::Ui, app: &mut App) {
     let tab = app.core.settings.tab;
     ui.horizontal(|ui| {
         ui.add_space(CONTENT_INSET);
-        if tab_button(ui, "Quarantine & Ignore", tab == SettingsTab::QuarantineIgnore) {
+        if tab_button(
+            ui,
+            "Quarantine & Ignore",
+            tab == SettingsTab::QuarantineIgnore,
+        ) {
             app.core.settings.tab = SettingsTab::QuarantineIgnore;
         }
-        ui.add_space(8.0);
+        ui.add_space(4.0);
         if tab_button(ui, "General", tab == SettingsTab::General) {
             app.core.settings.tab = SettingsTab::General;
         }
@@ -79,16 +83,24 @@ fn tab_button(ui: &mut egui::Ui, label: &str, active: bool) -> bool {
 
     let bg_idx = ui.painter().add(egui::Shape::Noop);
     let response = ui
-        .allocate_ui_with_layout(desired, egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            ui.add_space(H_PAD);
-            ui.label(egui::RichText::new(label).color(text_color));
-            ui.add_space(H_PAD);
-        })
+        .allocate_ui_with_layout(
+            desired,
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.add_space(H_PAD);
+                ui.label(egui::RichText::new(label).color(text_color));
+                ui.add_space(H_PAD);
+            },
+        )
         .response;
 
     let bg_rect = response.rect;
     let interact = ui
-        .interact(bg_rect, response.id.with("settings_tab"), egui::Sense::click())
+        .interact(
+            bg_rect,
+            response.id.with("settings_tab"),
+            egui::Sense::click(),
+        )
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     let fill = if active {
         colors::ACCENT_BLUE_BG
@@ -230,7 +242,9 @@ fn ignored_column(ui: &mut egui::Ui, app: &mut App) {
 
     if let Some(i) = remove_target {
         let entry = app.core.config.ignored[i].clone();
-        app.core.config.remove_ignored(&entry.path, &entry.virus_name);
+        app.core
+            .config
+            .remove_ignored(&entry.path, &entry.virus_name);
         app.toast("Removed from ignore list");
     }
 }
@@ -288,8 +302,11 @@ fn general_tab(ui: &mut egui::Ui, app: &mut App) {
 fn row_divider(ui: &mut egui::Ui) {
     let (rect, _) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), egui::Sense::hover());
-    ui.painter()
-        .hline(rect.x_range(), rect.center().y, Stroke::new(1.0, colors::BORDER));
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        Stroke::new(1.0, colors::BORDER),
+    );
 }
 
 /// 一行设置项：checkbox + 标题 + 说明文字。`enabled=false` 时整行变灰且 checkbox
@@ -304,8 +321,16 @@ fn toggle_row(
     enabled: bool,
 ) -> bool {
     let mut changed = false;
-    let title_color = if enabled { colors::TEXT_PRIMARY } else { colors::TEXT_MUTED };
-    let desc_color = if enabled { colors::TEXT_SECONDARY } else { colors::TEXT_MUTED };
+    let title_color = if enabled {
+        colors::TEXT_PRIMARY
+    } else {
+        colors::TEXT_MUTED
+    };
+    let desc_color = if enabled {
+        colors::TEXT_SECONDARY
+    } else {
+        colors::TEXT_MUTED
+    };
     ui.horizontal(|ui| {
         ui.add_enabled_ui(enabled, |ui| {
             if ui.checkbox(checked, "").changed() {
@@ -333,7 +358,7 @@ fn autostart_row(ui: &mut egui::Ui, app: &mut App) {
         ui,
         &mut checked,
         "Start CLV3000 automatically at login",
-        "Launches minimized to the system tray when you log in (same as starting with --tray-only).",
+        "Launches minimized to the tray when system log in (starting with --tray-only).",
         true,
     );
     if changed {
