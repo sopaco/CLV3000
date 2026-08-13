@@ -1,5 +1,24 @@
 //! 应用运行模式：控制主窗口与纯托盘循环之间的切换。
 
+/// eframe 会话启动时的初始模式（由 `main` 根据 `--tray-only` 与托盘事件决定）。
+///
+/// Windows 上 `--tray-only` 启动时，`main` 会在 eframe 之外空等托盘事件
+/// （`wait_in_tray`），完全不创建窗口——既不闪窗、也不占用 OpenGL 上下文内存。
+/// 用户从托盘请求显示窗口/关于/闪电扫描时才启动 eframe，并按此模式初始化。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitialMode {
+    /// 直接显示主窗口。
+    ShowWindow,
+    /// 启动即隐藏到托盘（macOS tray-only 路径：eframe 仍启动但初始隐藏，因为
+    /// 托盘事件投递依赖 NSApplication 事件循环，eframe 之外空等收不到托盘点击）。
+    #[allow(dead_code)] // 仅 macOS 路径构造，Windows 编译时无构造点
+    TrayOnly,
+    /// 启动并直接进入闪电扫描。
+    QuickScan,
+    /// 启动并直接显示「关于」独占窗口（来自托盘）。
+    About,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunMode {
     /// 显示 eframe 主窗口（含 OpenGL / egui）。
