@@ -242,6 +242,12 @@ pub fn config_file_path() -> PathBuf {
     app_data_dir().join("config.toml")
 }
 
+/// 隔离区目录：`<配置目录>\quarantine\`。威胁文件被"隔离"时移进这里（见
+/// `quarantine.rs`），不是删除——保留原文件内容，方便用户还原误报。
+pub fn quarantine_dir() -> PathBuf {
+    app_data_dir().join("quarantine")
+}
+
 pub fn ensure_dir(dir: &Path) {
     let _ = std::fs::create_dir_all(dir);
 }

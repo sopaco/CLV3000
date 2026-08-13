@@ -3,14 +3,17 @@
 
 mod about_dialog;
 mod app;
+mod autostart;
 mod clamav_info;
 mod config;
+mod context_menu;
 mod icon_data;
 mod icons;
 mod lifecycle;
 mod localtime;
 mod macos_reopen;
 mod paths;
+mod quarantine;
 mod scan;
 mod single_instance;
 mod sysmon;
@@ -19,17 +22,35 @@ mod tray;
 mod wakeup;
 mod widgets;
 
-use lifecycle::{parse_start_tray_only, InitialMode};
+use lifecycle::{parse_scan_path, parse_start_tray_only, InitialMode};
 
 fn main() {
+    // 右键菜单"用 CLV3000 扫描"/`--scan-path` 手动调试都可能在"已经有一个实例在跑"
+    // 时启动第二个进程——这种情况不能像过去那样直接弹"已经在运行"就退出，得把
+    // 扫描请求转发给正在跑的那个实例（见 `single_instance::forward_scan_request`）。
+    // 所以要在 `acquire()` 判断之前先解析好这个参数。
+    let scan_path_cli = parse_scan_path();
+
     if !single_instance::acquire() {
-        single_instance::notice_already_running();
+        if let Some(path) = &scan_path_cli {
+            if !single_instance::forward_scan_request(path) {
+                // 转发失败（极少数情况，比如具名事件/socket 都打不开）：退回旧行为，
+                // 至少告诉用户"已经在运行"，而不是悄无声息什么都没发生。
+                single_instance::notice_already_running();
+            }
+        } else {
+            single_instance::notice_already_running();
+        }
         return;
     }
 
     // 事件驱动的 UI 唤醒通道（托盘/菜单事件 → 转发线程 → request_repaint）。
     // 必须在托盘创建、eframe 会话启动之前初始化。
     wakeup::init();
+    // 起扫描请求转发监听（见模块文档）。必须在这里、`eframe::run_native` 之前调用
+    // ——Windows `--tray-only` 下进程可能长期停在下面的 `wait_in_tray` 里，不依赖
+    // eframe 是否已经启动。
+    single_instance::start_scan_request_listener();
 
     let start_tray_only = parse_start_tray_only();
 
@@ -57,7 +78,7 @@ fn main() {
     // 就一定会被创建并在首帧显示，`with_visible(false)` 拦不住。
     // macOS 的 tray-only 仍直接启动 eframe（隐藏），因为托盘事件投递依赖
     // NSApplication 事件循环，eframe 之外空等收不到托盘点击。
-    let initial = match resolve_initial_mode(&tray, start_tray_only) {
+    let initial = match resolve_initial_mode(&tray, start_tray_only, scan_path_cli) {
         Some(i) => i,
         None => return, // tray-only 下用户从托盘退出
     };
@@ -83,12 +104,24 @@ fn main() {
     );
 }
 
-/// 决定 eframe 启动时的初始模式。`--tray-only` 启动时：
-/// - Windows：在 eframe 之外空等托盘事件（`wait_in_tray`），直到用户请求显示
-///   窗口/关于/退出。返回 `None` 表示用户从托盘退出，main 直接 return。
-/// - macOS / 其它：仍启动 eframe（隐藏），因为托盘事件投递依赖 NSApplication
-///   事件循环，eframe 之外空等收不到托盘点击。
-fn resolve_initial_mode(tray: &Option<tray::Tray>, start_tray_only: bool) -> Option<InitialMode> {
+/// 决定 eframe 启动时的初始模式。
+/// - 带 `--scan-path`（右键菜单"用 CLV3000 扫描"/手动调试）：不管 `--tray-only`，
+///   直接进 `ScanPath` 模式显示窗口看扫描结果——用户显式要看一次扫描，不该被
+///   silently 吞进托盘。
+/// - 否则 `--tray-only` 启动时：
+///   - Windows：在 eframe 之外空等托盘事件（`wait_in_tray`），直到用户请求显示
+///     窗口/关于/退出，**或者**收到一个转发过来的扫描请求。返回 `None` 表示
+///     用户从托盘退出，main 直接 return。
+///   - macOS / 其它：仍启动 eframe（隐藏），因为托盘事件投递依赖 NSApplication
+///     事件循环，eframe 之外空等收不到托盘点击。
+fn resolve_initial_mode(
+    tray: &Option<tray::Tray>,
+    start_tray_only: bool,
+    scan_path: Option<std::path::PathBuf>,
+) -> Option<InitialMode> {
+    if let Some(path) = scan_path {
+        return Some(InitialMode::ScanPath(path));
+    }
     if !start_tray_only {
         return Some(InitialMode::ShowWindow);
     }
@@ -143,6 +176,11 @@ fn wait_in_tray(tray: &tray::Tray) -> Option<InitialMode> {
             } else if id == &tray.ids.quit {
                 return None;
             }
+        }
+        // 排空转发过来的扫描请求（右键菜单"用 CLV3000 扫描"，已经有实例在跑时走
+        // 这条路径——这个进程正停在 tray-only 的空等循环里，eframe 还没启动）。
+        if let Ok(path) = crate::wakeup::scan_requests().lock().unwrap().try_recv() {
+            return Some(InitialMode::ScanPath(path));
         }
 
         // 2. PeekMessage 非阻塞排空消息队列，DispatchMessage 让 tray-icon/muda 的

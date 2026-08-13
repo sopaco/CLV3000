@@ -541,6 +541,7 @@ fn scan_page(
 
         ui.add_space(20.0);
         let mut ignore_target: Option<usize> = None;
+        let mut quarantine_target: Option<usize> = None;
         for (i, threat) in state.threats.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.add_space((ui.available_width() - 700.0).max(0.0) / 2.0);
@@ -550,11 +551,7 @@ fn scan_page(
                     let action = widgets::threat_card(ui, &threat.virus_name, &path_str);
                     match action {
                         ThreatAction::Ignore => ignore_target = Some(i),
-                        ThreatAction::Quarantine => {
-                            toasts.push(Toast::new(
-                                "Quarantine will be available in a future release",
-                            ));
-                        }
+                        ThreatAction::Quarantine => quarantine_target = Some(i),
                         ThreatAction::None => {}
                     }
                     ui.add_space(8.0);
@@ -564,6 +561,24 @@ fn scan_page(
         if let Some(i) = ignore_target {
             let t = state.threats.remove(i);
             config.add_ignored(t.path.display().to_string(), t.virus_name);
+        }
+        if let Some(i) = quarantine_target {
+            // 索引在这一帧的 `state.threats` 里仍然有效——`ignore_target`/`quarantine_target`
+            // 是互斥的（同一次点击只可能触发其中一个 action），不会出现两个下标互相
+            // 打乱对方语义的情况。
+            let t = &state.threats[i];
+            match crate::quarantine::quarantine_file(&t.path, &t.virus_name) {
+                Ok(entry) => {
+                    config.add_quarantined(entry);
+                    state.threats.remove(i);
+                    toasts.push(Toast::new("File moved to quarantine"));
+                }
+                Err(e) => {
+                    // 隔离失败（常见原因：文件正被进程占用，删不掉/搬不动）——保留威胁
+                    // 卡片，把错误原样带给用户，不静默吞掉。
+                    toasts.push(Toast::new(e));
+                }
+            }
         }
     });
     state.content_height = content_height;

@@ -16,7 +16,7 @@ CLV3000 是纯 Rust 实现的极简 **手动杀毒工具**（egui 桌面 GUI + �
 ```mermaid
 graph LR
   subgraph app[CLV3000 单进程]
-    MAIN[main.rs 启动装配/单实例/wakeup::init]
+    MAIN[main.rs 启动装配/单实例/wakeup::init/Windows tray-only wait_in_tray]
     APP[app/ 主界面编排/事件轮询/生命周期对账]
     SCAN[scan/ 双扫描器+共享引擎+缓存+签名预筛]
     CFG[config.rs 配置持久化]
@@ -38,6 +38,7 @@ graph LR
 | 管道-过滤器 | 扫描器(quick/full_scan) 收集路径（内存列表或流式写入临时文件）→ `engine::run`（缓存/签名预筛 → 临时文件 → clamscan）→ 逐行解析回传 | 一次子进程启动、一次病毒库加载 |
 | 状态机 | `ScanPhase`(Idle/Enumerating/Scanning/Done) 驱动扫描页 | 异步扫描收敛为确定性 UI 状态 |
 | 事件驱动(事件唤醒) | 后台发 `ScanEvent`，UI 每帧 `try_recv`；UI 唤醒由 `wakeup` 转发线程 + sysmon 1Hz + 扫描 ~30fps 驱动，闲置时事件循环真正睡死 | 后台→前台唯一数据通道，老机器零空转 |
+| 启动形态 | `InitialMode`(ShowWindow/TrayOnly/QuickScan/About) 决定 eframe 初始姿态；Windows `--tray-only` 在 eframe 之外跑 Win32 消息循环（`wait_in_tray`：不创建窗口、零 OpenGL 上下文/纹理内存、不闪窗），macOS 仍启动 eframe（隐藏，因托盘事件投递依赖 NSApplication 事件循环）；QuickScan/About 以隐藏姿态创建、reconcile 首帧按目标尺寸显示 | 托盘态内存最小化 |
 
 ## 模块地图
 
@@ -49,14 +50,14 @@ graph LR
 | 扫描缓存 | 双索引 blake3 缓存：主索引 `scan_cache.tsv`（哈希→结果，按病毒库修订号失效、TTL/LRU 驱逐）+ 伴生路径索引文件（路径→`PathStamp{size,mtime_ns,hash}`，`quick_hash` 按尺寸/时间戳命中免内容哈希）；`CacheSnapshot` 只读快照供并行预筛共享，结果回写后台线程落盘（`save()` 双 compact 全量落盘）；>64MB 文件跳过 | `src/scan/cache.rs` |
 | Authenticode 校验 | PE `WinVerifyTrust` 信任签名验证 / macOS `codesign --verify`（Mach-O）；`is_trusted_signed` 作引擎预筛；`is_macho_file` 判 PE/Mach-O | `src/scan/authenticode.rs` |
 | 扫描协议 | `ScanEvent`（含 `Enumerating`/`EngineLoading{remaining}`/`ScanningFile{path}`/`WalkProgress{files_found}` 进度事件；`ScanStarted` 由闪电枚举后与全盘 walk 结束后各发一次）/`PathSource`(InMemory / File)/`Threat`/`ScanKind`/`CancelFlag(AtomicBool)` 统一契约 | `src/scan/mod.rs` |
-| 主界面编排 | `App` 主循环（每帧 `poll_background` 事件全排空、`poll_tray` 置顶、`reconcile_lifecycle` 对账生命周期↔视口可见性、macOS `sync_macos_minimized_viewport`、Toast、注册/注销 wakeup Context）；四页面(Dashboard/QuickScan/VirusDb/FullScan) 绘制拆到 `pages.rs`、自绘标题栏/侧栏/资源条拆到 `chrome.rs`，`AppCore`/`ScanPageState`/`VirusDbState` 状态与轮询拆到 `core.rs` | `src/app/mod.rs`+`src/app/core.rs`+`src/app/pages.rs`+`src/app/chrome.rs` |
+| 主界面编排 | `App` 主循环（每帧 `poll_background` 事件全排空、`poll_tray` 置顶、`reconcile_lifecycle` 对账生命周期↔视口可见性、macOS `sync_macos_minimized_viewport`、Toast、注册/注销 wakeup Context）；`App::new(…, initial: InitialMode)` 按启动形态初始化（QuickScan 直接开扫、About 开关于覆盖层）；扫描期间 macOS `ScanActivity` 防 App Nap、`hide_to_tray` 清空 egui 跨帧状态 + Windows 压缩工作集；四页面(Dashboard/QuickScan/VirusDb/FullScan) 绘制拆到 `pages.rs`、自绘标题栏/侧栏/资源条拆到 `chrome.rs`，`AppCore`/`ScanPageState`/`VirusDbState` 状态与轮询拆到 `core.rs` | `src/app/mod.rs`+`src/app/core.rs`+`src/app/pages.rs`+`src/app/chrome.rs` |
 | 配置持久化 | TOML：上次扫描摘要 `ScanRecord`、忽略列表 `IgnoredEntry`、可移动盘开关；损坏回退默认 | `src/config.rs` |
 | 系统托盘 | tray-icon+muda 图标与菜单；事件经 `wakeup` 转发线程阻塞等待并唤醒 UI（不再轮询），关窗默认隐藏到托盘 | `src/tray.rs`+`src/wakeup.rs` |
-| 生命周期 | `RunMode`(ShowWindow/TrayOnly/Quit) + `about_open`/`about_standalone` 覆盖标记；关于为主窗内覆盖层（模态/独占整窗），非独立 viewport | `src/lifecycle.rs`+`src/about_dialog.rs` |
+| 生命周期 | `InitialMode`(ShowWindow/TrayOnly/QuickScan/About) 启动形态 + `RunMode`(ShowWindow/TrayOnly/Quit) + `about_open`/`about_standalone` 覆盖标记；关于为主窗内覆盖层（模态/独占整窗），非独立 viewport | `src/lifecycle.rs`+`src/about_dialog.rs` |
 | 资源监控 | 独立线程每秒采样 CPU/内存并按 1Hz 主动唤醒 UI（`spawn(ctx)`，Mutex+Condvar 阻塞等待零空转、Drop 立即唤醒退出），渲染在底部资源条 | `src/sysmon.rs` |
 | 病毒库管理 | clamscan `-V` 解析引擎/病毒库版本（`ClamAvInfo::gather`/`database_version`，异步刷新）；freshclam 手动更新（`run_freshclam`/`database_signature` 跑前/跑后比对库目录签名区分"已更新/已最新"；macOS 读 freshclam.conf） | `src/clamav_info.rs`+`src/app/freshclam.rs` |
 | 路径定位 | exe 相对 `clamav\` 目录（macOS 优先 `.app` 包内 `Contents/Resources/clamav`，退回 exe 同目录）、配置目录（Windows `%APPDATA%\CLV3000` / macOS `~/Library/Application Support/CLV3000`）、`resolved_clamav_database_dir()`（内置/系统安装/`~/.clamav`）、macOS PATH 兜底、可用性探测 | `src/paths.rs` |
-| 平台集成 | 单实例锁（Windows 具名 Mutex / macOS Unix socket）、macOS 激活策略（Accessory/Regular + `is_miniaturized`/`is_app_active` 做最小化恢复与 Dock 唤回对账）、Win32 本地时间、构建时 Windows 资源 | `src/single_instance.rs`+`src/macos_reopen.rs`+`src/localtime.rs`+`build.rs` |
+| 平台集成 | 单实例锁（Windows 具名 Mutex / macOS Unix socket）、macOS 激活策略（Accessory/Regular + `is_miniaturized` 最小化恢复 + `bring_to_front` 提前收敛、扫描期间 `ScanActivity` 防 App Nap）、Win32 本地时间、构建时 Windows 资源 | `src/single_instance.rs`+`src/macos_reopen.rs`+`src/localtime.rs`+`build.rs` |
 
 ## 核心流程
 
@@ -70,13 +71,13 @@ graph LR
 
 **3. 取消扫描**：UI 置 `CancelFlag=true` → 引擎预筛阶段逐文件检查并立即短路；进入子进程后看门狗线程 100ms 轮询到即 `child.kill()`（`Arc<Mutex<Child>>` 共享句柄），stdout 关闭、读取循环退出，最终发 `Finished{cancelled:true}`。路径已预先写入临时文件，无 stdin 可关，软取消已不需要。
 
-**4. 托盘生命周期**：eframe 会话**全程存活**（不再销毁/重建——macOS 上重建会让托盘事件投递失效）：关闭按钮被拦截为"隐藏到托盘"（`hide_to_tray` 立即发 `Visible(false)` + 置 `window_hidden` + 释放 GPU 纹理/sysmon，macOS 切 `Accessory` 离开 Dock）→ 托盘/菜单点击由 `wakeup` 转发线程（阻塞在 tray-icon/muda 全局 channel，零 CPU）`request_repaint` 唤醒 → `reconcile_lifecycle` 每帧对账视口可见性，唤回时 macOS `bing_to_front` 连续 ~12 帧置顶；托盘/菜单请求前置窗口或 macOS 检测到 inactive→active（Dock 点击/Cmd+Tab）时同样触发置顶；从最小化恢复时 `sync_macos_minimized_viewport` 把 egui 陈旧的 `minimized` 标记与 `NSWindow` 真实状态对齐并补发 `Minimized(false)`（否则 `ui()` 整帧跳过、窗口卡死）。关于为主窗内覆盖层（来自托盘时独占整窗，关闭自动缩回托盘）。仅托盘"退出"置 `allow_exit` 真正结束。单实例：Windows `Global\CLV3000_SingleInstance_Mutex` / macOS Unix socket 锁（僵尸 socket 自动重绑），`CLV3000_ALLOW_MULTIPLE_INSTANCES` 可绕过。
+**4. 托盘生命周期**：Windows `--tray-only` 启动时 `main` 在 eframe **之外**跑 Win32 消息循环（`wait_in_tray`：`PeekMessage`/`DispatchMessage` + `MsgWaitForMultipleObjectsEx` 30ms 超时兜底，零 CPU），不创建任何窗口——零 OpenGL/纹理内存、不闪窗；用户从托盘请求窗口/关于/闪电扫描时按 `InitialMode` 才 `run_native`（macOS tray-only 仍直接启动 eframe 隐藏，因托盘事件投递依赖 NSApplication 事件循环）。窗口会话启动后 eframe **全程存活**（不再销毁/重建——macOS 重建会让托盘事件投递失效）：关闭按钮被拦截为"隐藏到托盘"（`hide_to_tray` 立即发 `Visible(false)` + 置 `window_hidden` + 释放 GPU 纹理/sysmon + 清空 egui 跨帧状态，Windows 再 `SetProcessWorkingSetSize(-1,-1)` 压缩工作集降内存，macOS 切 `Accessory` 离开 Dock）→ 托盘/菜单点击由 `wakeup` 转发线程（阻塞在 tray-icon/muda 全局 channel，零 CPU）`request_repaint` 唤醒 → `reconcile_lifecycle` 每帧对账视口可见性（"已隐藏"分支每帧重发 `Visible(false)` 兜底），唤回时 `bring_to_front` 以 60ms 间隔重试至多 `ACTIVATE_FRAMES` 帧（macOS 12 / 其它 2），App 已 active、窗口已是 key window 即返回 true 提前清零收敛；About 以隐藏姿态创建、reconcile 首帧按关于尺寸显示（避免闪 900x600 主窗）；从最小化恢复时 `sync_macos_minimized_viewport` 把 egui 陈旧的 `minimized` 标记与 `NSWindow` 真实状态对齐并补发 `Minimized(false)`（否则 `ui()` 整帧跳过、窗口卡死）。关于为主窗内覆盖层（来自托盘时独占整窗，关闭自动缩回托盘）。仅托盘"退出"置 `allow_exit` 真正结束。单实例：Windows `Global\CLV3000_SingleInstance_Mutex` / macOS Unix socket 锁（僵尸 socket 自动重绑），`CLV3000_ALLOW_MULTIPLE_INSTANCES` 可绕过。
 
 ## 技术选型
 
 - **语言/版本**：Rust 2024 edition，v0.7.5；无 async 运行时（ADR：阻塞 IO 场景线程更简单、取消=kill 直白）。
 - **GUI**：eframe/egui 0.36（glow + default_fonts）；即时模式，自绘深色主题与矢量图标（`theme.rs`/`icons.rs`，参照 `clv3000-design` skill 设计令牌）。
-- **平台 API**：windows crate 0.62（ToolHelp 进程/模块枚举、磁盘枚举、CreateMutexW、GetLocalTime、`CREATE_NO_WINDOW` 隐藏子进程控制台；`Win32_Security_WinTrust`/`Win32_Security_Cryptography` 支撑 Authenticode 信任签名校验）；macOS：objc2 + objc2-app-kit（NSApplication 激活策略 Accessory/Regular、窗口最小化状态、isActive）、sysinfo 枚举进程、`codesign` 子进程验 Mach-O 签名。
+- **平台 API**：windows crate 0.62（ToolHelp 进程/模块枚举、磁盘枚举、CreateMutexW、GetLocalTime、`CREATE_NO_WINDOW` 隐藏子进程控制台；`Win32_Security_WinTrust`/`Win32_Security_Cryptography` 支撑 Authenticode 信任签名校验；`SetProcessWorkingSetSize(-1,-1)` 托盘态压缩工作集降内存）；macOS：objc2 + objc2-app-kit + objc2-foundation（NSApplication 激活策略 Accessory/Regular、窗口最小化状态、`bring_to_front` 提前收敛；`NSProcessInfo` 的 `beginActivityWithOptions_reason`（UserInitiated）做扫描期防 App Nap）、sysinfo 枚举进程、`codesign` 子进程验 Mach-O 签名。
 - **哈希**：blake3 1（文件内容哈希，作扫描缓存键）。
 - **托盘**：tray-icon 0.24 + muda 0.19（菜单）；事件经 `src/wakeup.rs` 转发线程唤醒 UI。
 - **系统监控**：sysinfo 0.39（CPU/内存采样，兼作 macOS 进程枚举）。
@@ -100,7 +101,7 @@ graph LR
 
 | 概念 | 位置 | 说明 |
 |------|------|------|
-| 四页面编排 / 事件轮询 | `src/app/mod.rs`+`src/app/core.rs` | `App`（`core: AppCore`/`lifecycle`/`tray`/`toasts`/`window_hidden`/`activate_countdown`）；每帧 `poll_background`（事件全排空）、`poll_tray`（`poll_tray_events` 返回 focus 请求置顶）、`reconcile_lifecycle`、macOS `sync_macos_minimized_viewport`、`wakeup::register_ctx`；`AppCore`/`ScanPageState`/`VirusDbState` 状态与 poll 在 core.rs |
+| 四页面编排 / 事件轮询 | `src/app/mod.rs`+`src/app/core.rs` | `App`（`core: AppCore`/`lifecycle`/`tray`/`toasts`/`window_hidden`/`activate_countdown`，macOS 另有 `scan_activity`）；`App::new(…, initial: InitialMode)` 按启动形态初始化（QuickScan 直接开扫、About 开关于覆盖层）；每帧 `poll_background`（事件全排空）、`poll_tray`（`poll_tray_events` 返回 focus 请求置顶）、`reconcile_lifecycle`（"已隐藏"分支每帧重发 Visible(false) 兜底）、macOS `sync_macos_minimized_viewport`、`wakeup::register_ctx`；`hide_to_tray` 清空 egui 跨帧状态 + `trim_working_set`；`AppCore`/`ScanPageState`/`VirusDbState` 状态与 poll 在 core.rs |
 | 扫描状态机 | `src/app/core.rs` | `ScanPhase`(Idle/Enumerating/Scanning/Done) 驱动扫描页渲染 |
 | 扫描事件协议 | `src/scan/mod.rs` | `ScanEvent`（含 `EngineLoading`/`ScanningFile`/`WalkProgress`）/`PathSource`(InMemory/File)/`Threat`/`ScanKind`/`CancelFlag`；`authenticode`/`cache` 按平台门控发布 |
 | 子进程引擎 | `src/scan/engine.rs` | `run(PathSource)` 并行预筛（≤8 线程 `thread::scope`、<64 回退串行；`prescan_one`/`prescan_chunk`/`prescan_worker_count`，`CacheWrite` 记录）→ `run_clamscan_batch()`（临时文件+子进程写/读/看门狗）→ `finish_scan()`（先发 `Finished`、后台线程落盘缓存）；`apply_scan_flags`/`rsplit_result_line`/`parse_verdict` |
@@ -111,12 +112,12 @@ graph LR
 | 配置模型 | `src/config.rs` | `AppConfig`/`ScanRecord`/`IgnoredEntry`；`is_ignored`/`add_ignored` |
 | 路径解析 | `src/paths.rs` | exe 相对 clamav 目录（macOS 优先 `Contents/Resources/clamav`） + 配置目录 + `resolved_clamav_database_dir`/`freshclam_config_path` |
 | 托盘菜单与事件 | `src/tray.rs` | `Tray`/`TrayMenuIds`/`build`；事件经 wakeup 转发队列消费 |
-| UI 事件唤醒 | `src/wakeup.rs` | `init`/`ping`/`register_ctx`/`tray_events`/`menu_events` 转发线程 |
-| 生命周期模式 | `src/lifecycle.rs` | `RunMode` 三态 + `about_open`/`about_standalone`；`parse_start_tray_only` |
-| macOS 激活策略 | `src/macos_reopen.rs` | `set_accessory`（Accessory/Regular 切 Dock）/`bing_to_front`/`set_foreground`/`is_miniaturized`/`is_app_active`（最小化恢复、激活唤回） |
+| UI 事件唤醒 | `src/wakeup.rs` | `init`/`ping`/`register_ctx`/`tray_events`/`menu_events` 转发线程（eframe 未启动时 ping 为 no-op，由 `wait_in_tray` 直接排空） |
+| 生命周期模式 | `src/lifecycle.rs` | `InitialMode` 四态（ShowWindow/TrayOnly/QuickScan/About，QuickScan/About 由 main 的 `wait_in_tray` 决定）+ `RunMode` 三态 + `about_open`/`about_standalone`；`parse_start_tray_only` |
+| macOS 激活策略 | `src/macos_reopen.rs` | `set_accessory`（Accessory/Regular 切 Dock）/`bring_to_front`（返回 bool 提前收敛，仅状态未就绪才 activate/orderFrontRegardless）/`set_foreground`/`is_miniaturized`/`ScanActivity`（NSProcessInfo 防 App Nap） |
 | 资源监控 | `src/sysmon.rs` | `spawn(ctx)`/`SysMonHandle`/`ResourceSample`（1Hz 唤醒；Mutex+Condvar 阻塞、Drop 即醒） |
 | 病毒库信息与更新 | `src/clamav_info.rs`+`src/app/freshclam.rs` | `ClamAvInfo::gather`/`database_version`，解析 `clamscan -V`；`run_freshclam`/`database_signature`/`debug_log_freshclam` |
 | 关于框 | `src/about_dialog.rs` | `cached_info`/`paint_about_modal`/`paint_about_fullscreen`/`take_closed`（主窗内覆盖层） |
-| 启动装配 / 单实例 | `src/main.rs`+`src/single_instance.rs` | `main`/`build_viewport`、图标、`wakeup::init`、`acquire`/`notice_already_running`（Windows Mutex / macOS socket） |
+| 启动装配 / 单实例 | `src/main.rs`+`src/single_instance.rs` | `main`/`resolve_initial_mode`/`wait_in_tray`（Windows tray-only 在 eframe 之外跑 Win32 消息循环、不创建窗口，返回 `InitialMode`）/`build_viewport`（平台区分最小尺寸）/图标/`wakeup::init`、`acquire`/`notice_already_running`（Windows Mutex / macOS socket） |
 | 图标资产 | `src/icons.rs`+`src/icon_data.rs` | 手绘矢量 + PNG 解码 RGBA 程序图标 |
 | UI 原语与主题 | `src/widgets.rs`+`src/theme.rs`+`src/app/chrome.rs`+`src/app/pages.rs`+`src/app/util.rs` | progress_ring/stat_pill/threat_card/Toast；深色令牌 + `dotted_tile_image`/`card_frame`；标题栏/侧栏/资源条；页面绘制；`truncate`/`format_duration` |

@@ -7,6 +7,7 @@ mod chrome;
 mod core;
 mod freshclam;
 mod pages;
+mod settings;
 mod util;
 
 use crate::lifecycle::{InitialMode, Lifecycle, RunMode};
@@ -54,6 +55,7 @@ pub(crate) enum Page {
     QuickScan,
     VirusDb,
     FullScan,
+    Settings,
 }
 
 /// 托盘/菜单事件：窗口与纯托盘循环共用。
@@ -192,7 +194,11 @@ impl App {
         let mut lifecycle = Lifecycle::new(start_tray_only);
         let mut core = AppCore::new();
 
-        match initial {
+        // 按引用匹配（不是按值）：`InitialMode::ScanPath` 带一个 `PathBuf`，`initial`
+        // 因此不再是 `Copy`——按引用匹配不消费 `initial`，后面几处 `matches!(initial, ...)`
+        // 才还能继续用（那些调用本身也不绑定字段，即使按值匹配也不会移动，但统一按
+        // 引用写法更不容易在以后加新变体时踩坑）。
+        match &initial {
             InitialMode::ShowWindow | InitialMode::TrayOnly => {}
             InitialMode::QuickScan => {
                 core.page = Page::QuickScan;
@@ -204,6 +210,14 @@ impl App {
             InitialMode::About => {
                 lifecycle.about_open = true;
                 lifecycle.about_standalone = true;
+            }
+            InitialMode::ScanPath(path) => {
+                // 右键菜单"用 CLV3000 扫描"/`--scan-path` 冷启动：直接复用全盘扫描页
+                // 渲染（进度环/威胁列表/Done 态都已经支持任意目标），只是扫描线程跑
+                // `full_scan::run_single_target` 而不是遍历整个磁盘。`core` 刚构造，
+                // 不可能有扫描已经在跑，不用像 `begin_path_scan` 那样再判一次。
+                core.page = Page::FullScan;
+                core.full.start_path(path.clone());
             }
         }
 
@@ -341,6 +355,38 @@ impl App {
         }
     }
 
+    /// 排空右键菜单"用 CLV3000 扫描"/`--scan-path` 转发过来的扫描请求（见
+    /// `crate::wakeup::scan_requests`）。跟 `poll_tray` 同一个模式：事件已经在
+    /// `single_instance::start_scan_request_listener` 的后台线程里被推进全局队列，
+    /// 这里只管排空 + 把窗口带到前台。
+    fn poll_scan_requests(&mut self) {
+        let mut got_request = false;
+        while let Ok(path) = crate::wakeup::scan_requests().lock().unwrap().try_recv() {
+            got_request = true;
+            self.begin_path_scan(path);
+        }
+        if got_request {
+            // 托盘常驻时右键扫描过来，要能把窗口带到最前，跟托盘菜单"显示主窗口"
+            // 是同一件事——清掉可能打开的关于层，切到显示模式。
+            self.lifecycle.mode = RunMode::ShowWindow;
+            self.lifecycle.about_open = false;
+            self.lifecycle.about_standalone = false;
+            self.activate_countdown = self.activate_countdown.max(ACTIVATE_FRAMES);
+        }
+    }
+
+    /// 切到全盘扫描页并对指定路径开始扫描；已经有扫描在跑时只是弹 toast 提醒，
+    /// 不打断当前扫描（跟仪表盘/托盘菜单触发闪电扫描的守卫逻辑一致，见
+    /// `AppCore::any_scan_running` 的注释——两类扫描共享临时文件/缓存，不能并发）。
+    fn begin_path_scan(&mut self, path: std::path::PathBuf) {
+        if self.core.any_scan_running() {
+            self.toast("Finish the current scan before starting another");
+            return;
+        }
+        self.core.page = Page::FullScan;
+        self.core.full.start_path(path);
+    }
+
     /// 把生命周期模式对齐到真实的视口可见性 + macOS 激活策略。eframe 会话全程存活，
     /// 所以这里只发 `Visible` / 激活策略指令，绝不 `Close`（除非用户真的点了退出）。
     ///
@@ -467,6 +513,7 @@ impl eframe::App for App {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_tray();
+        self.poll_scan_requests();
 
         self.reconcile_lifecycle(ctx);
 
@@ -622,6 +669,7 @@ impl eframe::App for App {
                     Page::QuickScan => pages::quick_scan_page(ui, self),
                     Page::VirusDb => pages::virus_db_page(ui, self),
                     Page::FullScan => pages::full_scan_page(ui, self),
+                    Page::Settings => settings::settings_page(ui, self),
                 }
             });
 
