@@ -25,7 +25,7 @@ blake3 = "1"   # 文件基因缓存：内容哈希，纯 Rust、跨平台、比 
 # Win32_System_Registry：`autostart.rs`（HKCU\...\Run 开机自启动开关）和
 # `context_menu.rs`（HKCU\Software\Classes 右键"用 CLV3000 扫描"）共用同一个
 # feature，都是只读写 HKEY_CURRENT_USER，不需要管理员权限。
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus", "Win32_UI_WindowsAndMessaging", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_Security", "Win32_Security_WinTrust", "Win32_Security_Cryptography", "Win32_System_SystemInformation", "Win32_System_Registry"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_Security", "Win32_Security_WinTrust", "Win32_Security_Cryptography", "Win32_System_SystemInformation", "Win32_System_Registry"] }
 
 # macOS 专属：检测 Dock 图标点击 / Cmd+Tab 切回本 App，用于唤回被隐藏到托盘的主窗口
 # （winit 0.30 故意不处理 macOS 的 dock 重新打开事件，见 src/macos_reopen.rs）。

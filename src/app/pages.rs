@@ -574,14 +574,101 @@ fn scan_page(
                     toasts.push(Toast::new("File moved to quarantine"));
                 }
                 Err(e) => {
-                    // 隔离失败（常见原因：文件正被进程占用，删不掉/搬不动）——保留威胁
-                    // 卡片，把错误原样带给用户，不静默吞掉。
-                    toasts.push(Toast::new(e));
+                    // 隔离失败（常见原因：文件正被进程占用）。Windows 上弹出强制隔离
+                    // 确认对话框；其它平台直接弹错误 toast。
+                    #[cfg(windows)]
+                    {
+                        if state.pending_force_quarantine.is_none()
+                            && !state.is_force_quarantining()
+                        {
+                            state.pending_force_quarantine =
+                                Some(super::core::PendingForceQuarantine {
+                                    path: t.path.clone(),
+                                    virus_name: t.virus_name.clone(),
+                                });
+                        } else {
+                            toasts.push(Toast::new(e));
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        toasts.push(Toast::new(e));
+                    }
                 }
             }
         }
     });
     state.content_height = content_height;
+
+    // ── 强制隔离确认对话框 + 后台轮询（仅 Windows）──────────────────────
+    #[cfg(windows)]
+    {
+        // 确认对话框：普通隔离失败后，问用户是否强制隔离。
+        if state.pending_force_quarantine.is_some() {
+            let path_display = state
+                .pending_force_quarantine
+                .as_ref()
+                .unwrap()
+                .path
+                .display()
+                .to_string();
+            let mut confirmed = false;
+            let mut cancelled = false;
+            egui::Window::new("Force Quarantine")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.add_space(4.0);
+                    ui.label("The file is currently in use.");
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(truncate(&path_display, 56))
+                            .color(colors::TEXT_SECONDARY)
+                            .small(),
+                    );
+                    ui.add_space(8.0);
+                    ui.label("Do you want to force quarantine?");
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(80.0);
+                        if ui.button("Force Quarantine").clicked() {
+                            confirmed = true;
+                        }
+                        ui.add_space(8.0);
+                        if ui.button("Cancel").clicked() {
+                            cancelled = true;
+                        }
+                    });
+                });
+            if confirmed {
+                let pending = state.pending_force_quarantine.take().unwrap();
+                state.start_force_quarantine(ui.ctx(), pending);
+                toasts.push(Toast::new("Force quarantining…"));
+            } else if cancelled {
+                state.pending_force_quarantine = None;
+            }
+        }
+
+        // 后台线程完成轮询。
+        if let Some(result) = state.poll_force_quarantine() {
+            match result {
+                Ok((entry, path)) => {
+                    config.add_quarantined(entry);
+                    state.threats.retain(|t| t.path != path);
+                    toasts.push(Toast::new("File moved to quarantine"));
+                }
+                Err(e) => {
+                    toasts.push(Toast::new(e));
+                }
+            }
+        }
+
+        // 强制隔离执行中：持续请求重绘以轮询结果。
+        if state.is_force_quarantining() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
 }
 
 pub(super) fn virus_db_page(ui: &mut egui::Ui, app: &mut App) {

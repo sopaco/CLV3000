@@ -86,3 +86,17 @@ pub fn parse_scan_path() -> Option<std::path::PathBuf> {
     }
     None
 }
+
+/// 解析 `--force-quarantine <original> <dest>`：强制隔离提权子进程模式。
+/// 仅 Windows 上构造（由 `main` 在单实例检查之前拦截）。返回 `(原文件路径, 目标路径)`。
+#[cfg(windows)]
+pub fn parse_force_quarantine() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let args: Vec<String> = std::env::args().collect();
+    let i = args.iter().position(|a| a == "--force-quarantine")?;
+    let original = args.get(i + 1)?.clone();
+    let dest = args.get(i + 2)?.clone();
+    if original.is_empty() || dest.is_empty() {
+        return None;
+    }
+    Some((std::path::PathBuf::from(original), std::path::PathBuf::from(dest)))
+}

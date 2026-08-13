@@ -25,6 +25,21 @@ mod widgets;
 use lifecycle::{parse_scan_path, parse_start_tray_only, InitialMode};
 
 fn main() {
+    // ── 强制隔离提权子进程模式（仅 Windows）──────────────────────────
+    // `--force-quarantine <original> <dest>` 由主进程在普通隔离失败、需要 UAC 提权时
+    // 通过 `ShellExecuteExW("runas")` 启动。这个子进程不做任何 UI、不抢单实例锁，
+    // 只做"杀进程 + 搬文件"然后退出。必须在单实例检查之前拦截。
+    #[cfg(windows)]
+    if let Some((original, dest)) = lifecycle::parse_force_quarantine() {
+        match crate::quarantine::run_force_quarantine_helper(&original, &dest) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("Force quarantine failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // 右键菜单"用 CLV3000 扫描"/`--scan-path` 手动调试都可能在"已经有一个实例在跑"
     // 时启动第二个进程——这种情况不能像过去那样直接弹"已经在运行"就退出，得把
     // 扫描请求转发给正在跑的那个实例（见 `single_instance::forward_scan_request`）。
