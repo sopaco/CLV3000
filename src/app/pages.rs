@@ -5,13 +5,13 @@
 use super::core::{AppCore, ScanPageState, ScanPhase};
 use super::util::{format_duration, truncate};
 use super::{App, Page};
+use crate::config::AppConfig;
 use crate::icons;
 use crate::localtime::Timestamp;
 use crate::paths;
 use crate::scan::ScanKind;
 use crate::theme::colors;
 use crate::widgets::{self, ThreatAction, Toast};
-use crate::config::AppConfig;
 use eframe::egui;
 use egui::{Color32, Stroke, Vec2};
 use std::time::Duration;
@@ -301,8 +301,7 @@ fn scan_page(
                 let deco_radius = 56.0;
                 painter.circle_filled(deco_center, deco_radius, colors::BG_CARD);
                 painter.circle_stroke(deco_center, deco_radius, Stroke::new(2.0, ring_color));
-                let deco_glyph =
-                    egui::Rect::from_center_size(deco_center, Vec2::splat(glyph_size));
+                let deco_glyph = egui::Rect::from_center_size(deco_center, Vec2::splat(glyph_size));
                 icon(&painter, deco_glyph, Stroke::new(2.0, ring_color));
 
                 ui.add_space(14.0);
@@ -666,7 +665,8 @@ fn scan_page(
 
         // 强制隔离执行中：持续请求重绘以轮询结果。
         if state.is_force_quarantining() {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 }
@@ -764,7 +764,7 @@ fn virus_db_status_column(ui: &mut egui::Ui, app: &mut App) {
 fn virus_db_about_column(ui: &mut egui::Ui, app: &mut App) {
     let mut content_height = app.core.virus_db.about_col_height;
     widgets::vertically_centered(ui, &mut content_height, |ui| {
-        const LOGO_DISPLAY_PT: f32 = 90.0;
+        const LOGO_DISPLAY_PT: f32 = 120.0;
         if let Some(tex) = &app.app_icon_texture {
             ui.add(
                 egui::Image::new((tex.id(), tex.size_vec2()))
