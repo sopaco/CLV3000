@@ -4,7 +4,7 @@ mod scan_state;
 mod settings_state;
 mod virus_db;
 
-pub(crate) use scan_state::{ScanPageState, ScanPhase};
+pub(crate) use scan_state::{PendingForceQuarantine, ScanPageState, ScanPhase};
 pub(crate) use settings_state::{SettingsState, SettingsTab};
 pub(crate) use virus_db::{UpdateOutcome, VirusDbState};
 

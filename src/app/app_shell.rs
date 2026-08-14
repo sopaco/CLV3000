@@ -1,7 +1,9 @@
 //! `App` 结构体、资源管理与 `eframe::App` 实现。
 
 use super::core::AppCore;
-use super::lifecycle_view::{ACTIVATE_FRAMES, ACTIVATE_RETRY_INTERVAL_MS};
+use super::lifecycle_view::ACTIVATE_RETRY_INTERVAL_MS;
+#[cfg(target_os = "macos")]
+use super::lifecycle_view::ACTIVATE_FRAMES;
 use super::Page;
 use crate::lifecycle::{InitialMode, Lifecycle, RunMode};
 use crate::sysmon::{self, ResourceSample, SysMonHandle};
