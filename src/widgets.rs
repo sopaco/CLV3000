@@ -395,6 +395,93 @@ impl Toast {
     }
 }
 
+const ACTION_BTN_ICON_SIZE: f32 = 21.0;
+const ACTION_BTN_ICON_GAP: f32 = 10.0;
+const ACTION_BTN_H_PAD: f32 = 16.0;
+const ACTION_BTN_V_PAD: f32 = 10.0;
+
+/// 量出 `action_button` 最终会占多宽——用来在外层把多个按钮组成的一行整体居中。
+pub fn action_button_width(ui: &Ui, label: &str) -> f32 {
+    let text_w = measure_text_width(ui, label, 14.0);
+    ACTION_BTN_H_PAD * 2.0
+        + ACTION_BTN_ICON_SIZE
+        + ACTION_BTN_ICON_GAP
+        + text_w
+        + 2.0 * ui.spacing().item_spacing.x
+}
+
+/// 图标 + 文字的胶囊按钮；返回是否被点击。
+pub fn action_button(
+    ui: &mut Ui,
+    label: &str,
+    draw: impl FnOnce(&egui::Painter, egui::Rect, Stroke),
+) -> bool {
+    action_button_response(ui, label, draw).clicked()
+}
+
+/// 同 `action_button`，但返回完整 `Response`（用于挂 tooltip 等）。
+pub fn action_button_response(
+    ui: &mut Ui,
+    label: &str,
+    draw: impl FnOnce(&egui::Painter, egui::Rect, Stroke),
+) -> Response {
+    const ICON_SIZE: f32 = ACTION_BTN_ICON_SIZE;
+    const ICON_GAP: f32 = ACTION_BTN_ICON_GAP;
+    const H_PAD: f32 = ACTION_BTN_H_PAD;
+    const V_PAD: f32 = ACTION_BTN_V_PAD;
+
+    let text_size = Vec2::new(
+        measure_text_width(ui, label, 14.0),
+        ui.text_style_height(&egui::TextStyle::Body),
+    );
+
+    let desired = Vec2::new(
+        H_PAD * 2.0 + ICON_SIZE + ICON_GAP + text_size.x,
+        V_PAD * 2.0 + ICON_SIZE.max(text_size.y),
+    );
+
+    let bg_shape_idx = ui.painter().add(egui::Shape::Noop);
+    let response = ui
+        .allocate_ui_with_layout(
+            desired,
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.add_space(H_PAD);
+                let (icon_resp, painter) =
+                    ui.allocate_painter(Vec2::splat(ICON_SIZE), egui::Sense::hover());
+                draw(
+                    &painter,
+                    icon_resp.rect,
+                    Stroke::new(1.6, colors::ACCENT_BLUE),
+                );
+                ui.add_space(ICON_GAP);
+                ui.label(egui::RichText::new(label).color(colors::TEXT_PRIMARY));
+                ui.add_space(H_PAD);
+            },
+        )
+        .response;
+
+    let bg_rect = response.rect;
+    let interact = ui
+        .interact(bg_rect, response.id.with("btn"), egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let fill = if interact.hovered() {
+        colors::ACCENT_BLUE_BG
+    } else {
+        colors::BG_CARD
+    };
+    let shape = egui::epaint::RectShape::new(
+        bg_rect,
+        egui::CornerRadius::same(12),
+        fill,
+        Stroke::new(1.0, colors::BORDER),
+        egui::epaint::StrokeKind::Inside,
+    );
+    ui.painter().set(bg_shape_idx, egui::Shape::Rect(shape));
+
+    interact
+}
+
 pub fn show_toasts(ctx: &egui::Context, toasts: &[Toast]) {
     if toasts.is_empty() {
         return;
