@@ -11,7 +11,7 @@ CLV3000 是一个面向 Windows 的**便携式按需（on-demand）病毒扫描�
 
 ## 架构设计
 
-- **UI 壳层（egui/eframe 主线程）**：`src/app/` 下的 `AppShell` 持有全部 UI 状态，按 `Page` 枚举分派页面；`logic()` 处理托盘/扫描请求轮询、资源监控采样与"扫描时才重绘"的唤醒策略。
+- **UI 壳层（egui/eframe 主线程）**：`src/app/` 下的 `App` 持有全部 UI 状态，按 `Page` 枚举分派页面；拆为 `app_shell.rs`（`ui()`/`logic()`、资源加载/释放）与 `lifecycle_view.rs`（托盘轮询、扫描请求转发、`hide_to_tray`/窗口协调）；`logic()` 处理托盘/扫描请求轮询、资源监控采样与"扫描时才重绘"的唤醒策略。
 - **扫描后端（后台线程）**：`src/scan/` 以 `std::thread` + `mpsc::Sender<ScanEvent>` 单向通信上报进度/威胁，UI 每帧 `try_recv` 轮询；取消通过原子 `CancelFlag`。
 - **桌面集成层**：托盘、单实例、自启、右键菜单、macOS 重开，均独立模块、按 `cfg` 分平台实现。
 - **状态与配置**：`AppCore`（页面 + 三块页面状态）与 `AppConfig`（TOML 持久化，含忽略/隔离/扫描记录）。页面状态持有各自的后台线程句柄与事件接收端。
@@ -19,9 +19,10 @@ CLV3000 是一个面向 Windows 的**便携式按需（on-demand）病毒扫描�
 
 ```
 ┌─────────────────────────── egui/eframe 主线程 ───────────────────────────┐
-│ AppShell (app_shell.rs) ──┬─ AppCore ─┬─ ScanPageState(quick/full)        │
-│  ui()/logic()/tray/资源   │          ├─ VirusDbState                     │
-│  release_ui_resources()   │          └─ SettingsState                    │
+│ App (app_shell.rs + lifecycle_view.rs) ─┬─ AppCore ─┬─ ScanPageState      │
+│  ui()/logic()/tray/资源/窗口协调         │          │   (quick/full)      │
+│  release_ui_resources()                 │          ├─ VirusDbState       │
+│                                         │          └─ SettingsState      │
 └──┬──────────┬─────────────┘                                              │
    │ wakeup   │ mpsc<ScanEvent> / CancelFlag                                │
    ▼          ▼                                                             │
@@ -34,7 +35,7 @@ CLV3000 是一个面向 Windows 的**便携式按需（on-demand）病毒扫描�
 | 模块 | 职责 | 主要路径 |
 |------|------|----------|
 | 入口/启动 | CLI 参数解析（`--tray-only`/`--scan-path`）、viewport 构建、托盘初始化 | `src/main.rs`、`src/lifecycle.rs` |
-| UI 壳层 | App 装配、事件循环、页面分派、托盘/请求轮询、资源生命周期 | `src/app/app_shell.rs` |
+| UI 壳层 | App 装配、事件循环、页面分派、托盘/请求轮询、资源生命周期 | `src/app/app_shell.rs`、`src/app/lifecycle_view.rs` |
 | 页面 | 仪表盘、闪电/全盘扫描页、病毒库页、设置页 | `src/app/pages/*`、`src/app/settings.rs` |
 | 窗口框架 | 侧边栏、资源条、标题栏（非 Windows）、Toast | `src/app/chrome.rs`、`src/widgets.rs`、`src/theme.rs` |
 | 核心状态 | `AppCore`、扫描状态机（Idle/Enumerating/Scanning/Done）、设置、病毒库状态 | `src/app/core/*` |
@@ -94,15 +95,16 @@ CLV3000 是一个面向 Windows 的**便携式按需（on-demand）病毒扫描�
 | 概念 | 位置 | 备注 |
 |------|------|------|
 | 入口、CLI 模式 | `src/main.rs`、`src/lifecycle.rs` | `InitialMode`/`RunMode` |
-| App 壳、事件循环 | `src/app/app_shell.rs` | `ui()`/`logic()`/`hide_to_tray` |
-| 页面与框架 | `src/app/pages/`、`src/app/chrome.rs`、`src/app/settings.rs` | `Page` 枚举分派 |
-| 核心状态 | `src/app/core/mod.rs`、`scan_state.rs`、`settings_state.rs`、`virus_db.rs` | `AppCore`、`ScanPhase` 状态机 |
+| App 壳、事件循环 | `src/app/app_shell.rs`、`src/app/lifecycle_view.rs` | `ui()`/`logic()`（app_shell）；`hide_to_tray`/`reconcile_lifecycle`/托盘与扫描请求轮询（lifecycle_view） |
+| 页面与框架 | `src/app/pages/`、`src/app/chrome.rs`、`src/app/settings.rs` | `Page` 枚举分派；`settings_page` 在 settings.rs |
+| 核心状态 | `src/app/core/mod.rs`、`scan_state.rs`、`settings_state.rs`、`virus_db.rs` | `AppCore`、`ScanPhase` 状态机、`apply_scan_event` |
 | 扫描编排 | `src/scan/engine.rs`、`src/scan/cache.rs` | 预扫描、clamscan 批处理、缓存 |
 | 闪电/全盘扫描 | `src/scan/quick_scan.rs`、`src/scan/full_scan.rs` | 进程枚举 / 磁盘遍历 |
 | 签名预过滤 | `src/scan/authenticode.rs` | WinVerifyTrust / codesign |
 | 病毒库更新 | `src/app/freshclam.rs`、`src/clamav_info.rs` | freshclam 子进程、版本解析 |
-| 威胁处置 | `src/quarantine.rs`、`src/config.rs` | 隔离/恢复/强制隔离 |
+| 威胁处置 | `src/quarantine.rs`、`src/config.rs` | 隔离/恢复/强制隔离（杀占用进程+提权） |
 | 托盘/单实例/自启/右键 | `src/tray.rs`、`src/single_instance.rs`、`src/autostart.rs`、`src/context_menu.rs` | 分平台 cfg 实现 |
 | 后台唤醒与请求桥 | `src/wakeup.rs`、`src/macos_reopen.rs` | 线程→UI 重绘、扫描请求转发 |
 | 路径/配置/监控 | `src/paths.rs`、`src/config.rs`、`src/sysmon.rs` | clamav 目录解析、TOML 持久化、资源采样 |
 | 主题/图标/组件 | `src/theme.rs`、`src/icons.rs`、`src/icon_data.rs`、`src/widgets.rs`、`src/about_dialog.rs` | 设计 token、图标、通用控件 |
+```

@@ -1,11 +1,11 @@
 ---
 type: project
 project: clv3000
-title: CLV3000
+title: clv3000
 source: .
 ---
 
-# CLV3000
+# clv3000
 
 
 
@@ -19,44 +19,47 @@ source: .
 
 ## Structure
 
+  - Cargo.toml
+  - LICENSE
   - .agents/
     - skills/
-  - .cargo/
-    - config.toml
   - .claude/
     - skills/
+  - Cargo.lock
+  - build.rs
+  - README.md
+  - .cargo/
+    - config.toml
   - .gitignore
+  - scripts/
+    - bundle-macos.sh
   - AGENTS.md
   - assets/
     - backgrounds/
     - icons/
     - introduce_clv3000.png
-  - build.rs
-  - Cargo.lock
-  - Cargo.toml
-  - LICENSE
-  - README.md
-  - scripts/
-    - bundle-macos.sh
+  - .codegraph/
+    - codegraph.db
+    - .gitignore
   - src/
-    - about_dialog.rs
-    - app/
     - autostart.rs
-    - clamav_info.rs
-    - config.rs
-    - context_menu.rs
     - icons.rs
+    - app/
+    - context_menu.rs
+    - config.rs
     - icon_data.rs
-    - lifecycle.rs
-    - localtime.rs
-    - macos_reopen.rs
-    - main.rs
-    - paths.rs
-    - quarantine.rs
-    - scan/
-    - single_instance.rs
     - sysmon.rs
+    - paths.rs
     - theme.rs
     - tray.rs
+    - clamav_info.rs
     - wakeup.rs
+    - macos_reopen.rs
+    - scan/
+    - about_dialog.rs
+    - localtime.rs
+    - main.rs
+    - lifecycle.rs
+    - quarantine.rs
     - widgets.rs
+    - single_instance.rs
