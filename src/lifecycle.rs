@@ -17,8 +17,10 @@ pub enum InitialMode {
     #[allow(dead_code)] // 仅 macOS 路径构造，Windows 编译时无构造点
     TrayOnly,
     /// 启动并直接进入闪电扫描。
+    #[allow(dead_code)] // 仅 Windows 托盘菜单构造（wait_in_tray），非 Windows 编译时无构造点
     QuickScan,
     /// 启动并直接显示「关于」独占窗口（来自托盘）。
+    #[allow(dead_code)] // 同上
     About,
     /// 启动并直接扫描给定的单个文件/文件夹——来自 `--scan-path` 命令行参数
     /// （右键菜单"用 CLV3000 扫描"触发的冷启动），或已有实例在跑时通过

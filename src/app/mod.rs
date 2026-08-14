@@ -462,9 +462,23 @@ impl App {
             crate::macos_reopen::set_accessory(true);
         } else {
             // 已隐藏：确保每个隐藏周期都落到 Accessory（例如 `--tray-only` 启动即隐藏）。
-            // 同时重复发 Visible(false) 兜底——即使窗口因 eframe 初始化逻辑被短暂显示，
-            // 这里也能在下一帧把它藏回来。Visible(false) 对已隐藏窗口是 no-op，开销极低。
-            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+            //
+            // 关键省电点：这里**不能每帧都发 `Visible(false)`**。egui 的
+            // `Context::send_viewport_cmd` 内部会调 `request_repaint_of`（见 egui
+            // `context.rs::send_viewport_cmd_to`），每帧发一次就等于「每帧都 request
+            // 重绘」。eframe 对不可见/最小化窗口有 100ms 的节流重绘（见
+            // `eframe::native::run::check_redraw_requests` 与 `INVISIBLE_WINDOW_REPAINT_INTERVAL`
+            // = 100ms，对应 emilk/egui#7776），于是事件循环会以 ~10Hz 反复重绘这个本已
+            // 隐藏的窗口——正是「托盘常驻时 CPU time 一直累积、常驻 ~1%」的根因。
+            //
+            // 改法：只在 egui 仍认为窗口「可见」时才补发 `Visible(false)`（覆盖 eframe
+            // 首帧可能短暂显示窗口的情况，防闪窗）；窗口一旦真正隐藏，`visible()` 变
+            // 成 `false`，就不再发，重绘请求随即归零，事件循环进入 `ControlFlow::Wait`
+            // 真正睡死。窗口隐藏后这条命令本就是 no-op，但「每帧发」本身会点亮重绘。
+            let still_visible = ctx.input(|i| i.viewport().visible().unwrap_or(false));
+            if still_visible {
+                ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+            }
             #[cfg(target_os = "macos")]
             crate::macos_reopen::set_accessory(true);
         }

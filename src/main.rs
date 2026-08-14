@@ -211,13 +211,21 @@ fn wait_in_tray(tray: &tray::Tray) -> Option<InitialMode> {
             }
         }
 
-        // 3. 阻塞等待新消息到达（0 CPU）。30ms 超时兜底转发线程与主线程的竞态：
+        // 3. 阻塞等待新消息到达（0 CPU）。100ms 超时兜底转发线程与主线程的竞态：
         //    dispatch 后转发线程可能还没把事件转发到我们的 channel，本轮排空落空，
-        //    30ms 后超时醒来再排空一次。托盘点击延迟 30ms 无感。
+        //    100ms 后超时醒来再排空一次。托盘点击延迟 ≤100ms 无感。用 100ms 而非
+        //    更小的值（原来是 30ms）是为了减少空闲时的唤醒次数、省电——这里是纯
+        //    托盘常驻时主线程唯一的「心跳」，30ms 相当于 ~33Hz 空转，100ms 降到
+        //    ~10Hz，托盘菜单响应依然即时（点击本身会立刻产生 Windows 消息唤醒本循环，
+        //    多出来的延迟只发生在「转发线程已写入 channel、但本循环正卡在等待」的
+        //    极小竞态窗口里）。
+        //
+        // 注意：不能用 INFINITE——转发线程把事件写进的是 std mpsc（不投递 Windows
+        // 消息），本循环卡在等待 Windows 消息时会永远等不到，必须靠这个超时兜底排空。
         let _ = unsafe {
             MsgWaitForMultipleObjectsEx(
                 None,
-                30,
+                100,
                 QS_ALLINPUT,
                 MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS(MWMO_INPUTAVAILABLE.0),
             )

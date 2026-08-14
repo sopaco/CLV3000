@@ -63,14 +63,18 @@ pub(crate) struct ScanPageState {
     pub(crate) engine_scanning_path: Option<String>,
     /// 普通隔离失败后，等待用户确认是否强制隔离。对话框期间存住威胁信息，
     /// 用户点"确认"→ 起后台线程跑 `force_quarantine_file`；点"取消"→ 清空、回到威胁列表。
+    #[allow(dead_code)] // 仅 Windows 强制隔离路径读写，非 Windows 编译时读写点都被 cfg 掉
     pub(crate) pending_force_quarantine: Option<PendingForceQuarantine>,
     /// 强制隔离后台线程的结果回传通道。`Some` 表示线程在跑，每帧 `try_recv` 轮询。
+    #[allow(dead_code)] // 同上
     force_quarantine_rx: Option<Receiver<Result<crate::config::QuarantineEntry, String>>>,
     /// 正在强制隔离的威胁文件路径（用于后台线程完成后从 `threats` 里按路径找到并移除）。
+    #[allow(dead_code)] // 同上
     force_quarantine_path: Option<PathBuf>,
 }
 
 /// 待确认的强制隔离请求——普通隔离失败后弹出确认对话框用。
+#[allow(dead_code)] // 仅 Windows 强制隔离确认对话框构造，非 Windows 编译时无构造点
 pub(crate) struct PendingForceQuarantine {
     pub(crate) path: PathBuf,
     pub(crate) virus_name: String,
@@ -225,6 +229,7 @@ impl ScanPageState {
     }
 
     /// 强制隔离是否正在后台执行（用于 UI 显示"处理中"状态）。
+    #[allow(dead_code)] // 仅 Windows 路径调用，非 Windows 编译时无调用点
     pub(crate) fn is_force_quarantining(&self) -> bool {
         self.force_quarantine_rx.is_some()
     }
