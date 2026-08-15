@@ -4,7 +4,11 @@ mod scan_state;
 mod settings_state;
 mod virus_db;
 
-pub(crate) use scan_state::{PendingForceQuarantine, ScanPageState, ScanPhase};
+pub(crate) use scan_state::{ScanPageState, ScanPhase};
+// PendingForceQuarantine 只在 Windows 扫码页强制隔离逻辑里用到（cfg(windows)），
+// 在非 Windows 构建下这个重导出会报 unused import，所以按平台条件导出。
+#[cfg(windows)]
+pub(crate) use scan_state::PendingForceQuarantine;
 pub(crate) use settings_state::{SettingsState, SettingsTab};
 pub(crate) use virus_db::{UpdateOutcome, VirusDbState};
 

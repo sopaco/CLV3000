@@ -85,13 +85,21 @@ mod imp {
         Ok(())
     }
 
-    /// 写一组键：`<root>\shell\CLV3000Scan`（默认值=菜单文字，`Icon`=exe 路径）+
-    /// 子键 `command`（默认值 = `"<exe>" --scan-path "%1"`）。
+    /// 写一组键：`<root>\shell\CLV3000Scan`（默认值=菜单文字，`Icon`=exe 的第二个
+    /// 图标资源 `icon_tray`，用 `"<exe>,-2"` 按资源 ID 引用）+ 子键 `command`
+    /// （默认值 = `"<exe>" --scan-path "%1"`）。
+    ///
+    /// 注意 `Icon` 不能只写 exe 路径——那样 Explorer 会取 exe 的**主图标**
+    /// （资源 ID 1 = `icon_app`，文件/任务栏用的那个），右键菜单图标跟文件图标
+    /// 就一样了。这里特意引用资源 ID 2（`icon_tray`），让菜单用简化版托盘图标、
+    /// 同时 exe 文件本身仍是 `icon_app`。
     fn register_root(root: &str, exe: &str) -> Result<(), String> {
         let verb_subkey = HSTRING::from(format!("Software\\Classes\\{root}\\shell\\{VERB_KEY}"));
         let verb_hkey = create_key(&verb_subkey)?;
         set_default_value(verb_hkey, MENU_LABEL)?;
-        set_named_value(verb_hkey, "Icon", exe)?;
+        // `-2` 的负号表示"按资源 ID 引用"（不是目录序号），由 build.rs 把
+        // `icon_tray.ico` 嵌成资源 ID 2。顺序无关、确定，比 `,1` 序号更稳。
+        set_named_value(verb_hkey, "Icon", &format!("{exe},-2"))?;
         unsafe {
             let _ = RegCloseKey(verb_hkey);
         }

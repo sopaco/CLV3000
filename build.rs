@@ -30,9 +30,19 @@
 //!    标准做法。
 
 const ICON_REL: &str = "assets/icons/icon_app.ico";
+/// 第二个图标（右键菜单"Scan with CLV3000"用的简化版托盘图标）。
+/// 资源 ID = 2，跟主图标（icon_app，资源 ID = 1）分开，这样 exe
+/// 的文件/任务栏图标仍是 icon_app，而右键菜单可以单独引用 `-2` 用 icon_tray。
+const TRAY_ICON_REL: &str = "assets/icons/icon_tray.ico";
+/// 第三个图标（用户自备的扩展包图标 icon_expack_1）。资源 ID = 3，仅作为
+/// "备用自定义图标"嵌进 exe——用户在 Windows 上需要时可以选它（快捷方式
+/// "更改图标"、或把右键菜单 `Icon` 改成 `"<exe>,-3"` 等）。不影响前两个图标。
+const EXPACK_ICON_REL: &str = "assets/icons/icon_expack_1.ico";
 
 fn main() {
     println!("cargo:rerun-if-changed={ICON_REL}");
+    println!("cargo:rerun-if-changed={TRAY_ICON_REL}");
+    println!("cargo:rerun-if-changed={EXPACK_ICON_REL}");
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os != "windows" {
@@ -49,10 +59,28 @@ fn main() {
         panic!("Windows 图标文件不存在：{icon_path}");
     }
 
+    let tray_icon_path = format!("{manifest_dir}/{TRAY_ICON_REL}");
+    if !std::path::Path::new(&tray_icon_path).exists() {
+        panic!("Windows 托盘图标文件不存在：{tray_icon_path}");
+    }
+
+    let expack_icon_path = format!("{manifest_dir}/{EXPACK_ICON_REL}");
+    if !std::path::Path::new(&expack_icon_path).exists() {
+        panic!("Windows 扩展包图标文件不存在：{expack_icon_path}");
+    }
+
     let mut res = winresource::WindowsResource::new();
     configure_cross_toolchain(&mut res);
     // 绝对路径：避免 windres/rc.exe 因工作目录不同而找不到相对路径里的 .ico。
     res.set_icon(&icon_path);
+    // 第二个图标资源（ID = 2）：右键菜单"Scan with CLV3000"用的简化版托盘图标
+    // icon_tray，与文件/任务栏主图标 icon_app（ID = 1）区分。注册表里用 `"<exe>,-2"`
+    // 引用它（负数 = 资源 ID，而非目录序号，跟图标排列顺序无关、确定）。
+    res.set_icon_with_id(&tray_icon_path, "2");
+    // 第三个图标资源（ID = 3）：用户自备的扩展包图标 icon_expack_1，仅作为
+    // 备用自定义图标嵌进去——需要时（如右键菜单 `Icon` 改成 `"<exe>,-3"`、
+    // 或快捷方式"更改图标"）可选它，不影响前两个图标。
+    res.set_icon_with_id(&expack_icon_path, "3");
 
     if let Err(e) = res.compile() {
         let target = std::env::var("TARGET").unwrap_or_default();
