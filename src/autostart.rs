@@ -191,6 +191,23 @@ mod imp {
             if let Some(parent) = path.parent() {
                 crate::paths::ensure_dir(parent);
             }
+            // macOS 坑：LaunchAgent 不能用「裸可执行文件路径」直接拉起 GUI / 托盘 App。
+            // 1) `RunAtLoad` 会在登录会话（WindowServer / 菜单栏 NSStatusItem 基础设施）
+            //    还没就绪时就 early-spawn 进程，tray-icon 创建会失败，App 走
+            //    "Failed to initialize tray icon; running without system tray" 分支；
+            //    加上 --tray-only 会把 activationPolicy 设成 accessory（隐藏 Dock 图标），
+            //    结果就是「既没托盘图标也没 Dock 图标」，看起来像没启动 / 启动后退出了。
+            // 2) 裸 exec 不是经由 Launch Services / NSWorkspace 启动的正规 GUI App，
+            //    NSStatusItem 往往渲染不出来。
+            // 正确做法：用 `open -a <bundle> --args --tray-only`。`open` 会等用户会话
+            // 就绪后再把 App 作为正规 GUI App 拉起，托盘图标就能正常出现。
+            let bundle = exe
+                .parent() // .../Contents/MacOS
+                .and_then(|p| p.parent()) // .../Contents
+                .and_then(|p| p.parent()) // .../CLV3000.app
+                .ok_or_else(|| {
+                    "Failed to derive .app bundle path from executable".to_string()
+                })?;
             let plist = format!(
                 r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -200,15 +217,20 @@ mod imp {
     <string>{LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{exe}</string>
+        <string>/usr/bin/open</string>
+        <string>-a</string>
+        <string>{bundle}</string>
+        <string>--args</string>
         <string>--tray-only</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <key>ProcessType</key>
+    <string>Interactive</string>
 </dict>
 </plist>
 "#,
-                exe = exe.display()
+                bundle = bundle.display()
             );
             // 只写文件，不调 `launchctl load`——`load` 会让 launchd 立刻按
             // `RunAtLoad` 把它跑起来，等于用户刚勾选"开机自启动"这一下就在当前
