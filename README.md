@@ -49,7 +49,11 @@ CLV3000 is a portable, fast virus scanning tool for Windows, designed as a stand
 
 ## Quick Start
 
-### Prerequisites
+### Use Prebuilt Bundle (Recommend)
+Recommend downloading the pre-compiled software package from the [**Github Release**](https://github.com/sopaco/CLV3000/releases); the `CLV3000-x64-0.7.7-bundled.zip
+` file contains a complete GUI, antivirus engine, and signature database – ready to use out of the box.
+
+### Use GUI Only (Optional & DIY)
 
 A portable ClamAV installation must be placed alongside the executable:
 
