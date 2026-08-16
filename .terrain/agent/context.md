@@ -76,7 +76,7 @@ CLV3000 是一个面向 Windows 的**便携式按需（on-demand）病毒扫描�
 
 - **语言/版本**：Rust，edition 2024；release 用体积优化（`opt-level="s"`、`lto`、`panic="abort"`、`strip`）。
 - **GUI**：egui / eframe 0.36（glow 渲染、默认字体，非默认特性）；无自定义依赖重量级 UI。
-- **Windows 原生**：`windows` crate 0.62（Toolhelp、WinTrust、Shell、注册表、进程管理等）；资源文件用 `winresource`（build.rs）。
+- **Windows 原生**：`windows` crate 0.62（Toolhelp、WinTrust、Shell、注册表、进程管理等）；资源文件用 `winresource`（build.rs，exe 内嵌三枚 ico 资源：主图标 `icon_app`=ID 1、托盘图标 `icon_tray`=ID 2、扩展包图标 `icon_expack_1`=ID 3）。
 - **macOS 原生**：`objc2` 系列（AppKit/Foundation）；`macos_reopen.rs` 处理重开事件。
 - **系统托盘/菜单**：`tray-icon` + `muda`。
 - **扫描外部依赖**：ClamAV 便携目录（`clamscan`/`freshclam` + `database/*.cvd`），以子进程方式调用，**不**在进程内加载引擎。
@@ -86,7 +86,8 @@ CLV3000 是一个面向 Windows 的**便携式按需（on-demand）病毒扫描�
 
 - **外部进程契约**：`clamscan`（扫描/`--version`）、`freshclam`（更新/`--datadir`）。两者必须位于 exe 旁 `clamav/` 目录或 PATH；缺失不崩溃，UI 显示"engine not found"。
 - **文件系统**：exe 旁 `clamav/database/`（签名库）；AppData 下 `config.toml`、扫描缓存、隔离目录；全盘扫描临时 walklist 写系统 temp。
-- **注册表**：自启 Run 键、右键菜单 `ShellEx`/verb 键（读写）；单实例命名 Mutex。
+- **注册表**：自启 Run 键、右键菜单 `ShellEx`/verb 键（读写；菜单 `Icon` 写 `"<exe>,-2"`，按资源 ID 引用内嵌的 `icon_tray` 托盘图标而非 exe 主图标）；单实例命名 Mutex。
+- **macOS 自启**：写 LaunchAgent plist（`RunAtLoad` + `Interactive`），经 `/usr/bin/open -a <bundle> --args --tray-only` 由 Launch Services 以正规 GUI App 拉起，避免裸 exec 时托盘/Dock 图标缺失。
 - **网络**：仅 freshclam 更新签名库时访问 ClamAV 服务器（不经应用 HTTP 栈）。
 - **信任边界**：隔离/强制隔离会终止占用进程并可能触发 UAC 提权，属高风险操作；签名预过滤信任系统证书链；mock 模式（非 Win/mac）数据全部为合成，仅用于 UI 预览。
 
@@ -103,8 +104,7 @@ CLV3000 是一个面向 Windows 的**便携式按需（on-demand）病毒扫描�
 | 签名预过滤 | `src/scan/authenticode.rs` | WinVerifyTrust / codesign |
 | 病毒库更新 | `src/app/freshclam.rs`、`src/clamav_info.rs` | freshclam 子进程、版本解析 |
 | 威胁处置 | `src/quarantine.rs`、`src/config.rs` | 隔离/恢复/强制隔离（杀占用进程+提权） |
-| 托盘/单实例/自启/右键 | `src/tray.rs`、`src/single_instance.rs`、`src/autostart.rs`、`src/context_menu.rs` | 分平台 cfg 实现 |
+| 托盘/单实例/自启/右键 | `src/tray.rs`、`src/single_instance.rs`、`src/autostart.rs`、`src/context_menu.rs` | 分平台 cfg 实现；右键菜单 `Icon` 引用 exe 内嵌 `icon_tray`（资源 ID 2）；macOS 自启经 `open -a` 拉起 |
 | 后台唤醒与请求桥 | `src/wakeup.rs`、`src/macos_reopen.rs` | 线程→UI 重绘、扫描请求转发 |
 | 路径/配置/监控 | `src/paths.rs`、`src/config.rs`、`src/sysmon.rs` | clamav 目录解析、TOML 持久化、资源采样 |
 | 主题/图标/组件 | `src/theme.rs`、`src/icons.rs`、`src/icon_data.rs`、`src/widgets.rs`、`src/about_dialog.rs` | 设计 token、图标、通用控件 |
-```
