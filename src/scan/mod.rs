@@ -116,3 +116,56 @@ pub fn is_macho_file(path: &std::path::Path) -> bool {
         [0xBE, 0xBA, 0xFE, 0xCA]   // FAT_CIGAM
     )
 }
+
+/// 全盘扫描收集阶段用来替代 `is_macho_file` 的判定：在确认是 Mach-O 的基础上，
+/// 再多读 12 字节拿到 `filetype` 字段，只保留"会被实际加载执行"的类型，直接丢弃
+/// 纯构建中间产物 `.o`（MH_OBJECT）。
+///
+/// 为什么需要它：macOS 全盘扫描收集的是"所有 Mach-O"，但 `.o` 目标文件数量极其
+/// 庞大（Xcode `DerivedData`、Homebrew 构建、`node-gyp`、Rust `target/` 等目录里
+/// 动辄几十上百万个），它们无法独立运行、不是用户关心的"可执行程序"，正是"扫描了
+/// 大量非可执行程序"的主要噪声来源。若只靠 `is_macho_file`（只看魔数），这些 `.o`
+/// 也会被收进待扫列表并喂给引擎，纯属浪费。
+///
+/// 保留的类型（`COLLECT_MACHO_FILETYPES`，可调）：
+/// - `MH_EXECUTE` (0x2)：真正可执行程序
+/// - `MH_DYLIB`   (0x6)：动态库（可被注入/劫持，威胁相关）
+/// - `MH_BUNDLE`  (0x8)：可加载包（`.bundle` / `.kext` 等）
+///
+/// fat / universal 二进制（App、绝大多数 dylib、可执行都长这样）一律保留，不解析
+/// 内部 slice——它们几乎不会是 `.o`。若只想扫"可执行程序"，把列表改成只留 `0x2`
+/// 即可（代价是跳过动态库，会损失一部分威胁覆盖）。
+#[cfg(target_os = "macos")]
+pub fn is_collectable_macho(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut hdr = [0u8; 16];
+    let n = match f.read(&mut hdr) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    if n < 4 {
+        return false;
+    }
+    let magic = u32::from_be_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+    match magic {
+        // fat / universal（含 64 位 fat）：App、绝大多数 dylib、可执行都长这样，保留。
+        0xCAFEBABE | 0xBEBAFECA | 0xCAFEBABF | 0xBFBAFECA => true,
+        // thin 32/64 位：读 `filetype`（偏移 12，4 字节，大端）。
+        0xFEEDFACE | 0xCEFAEDFE | 0xFEEDFACF | 0xCFAEDFE => {
+            if n < 16 {
+                return true; // 读不全就保守保留，避免出现漏判。
+            }
+            let filetype = u32::from_be_bytes([hdr[12], hdr[13], hdr[14], hdr[15]]);
+            COLLECT_MACHO_FILETYPES.contains(&filetype)
+        }
+        _ => false,
+    }
+}
+
+/// 全盘扫描默认收集的 Mach-O `filetype`（见 `is_collectable_macho`）。
+#[cfg(target_os = "macos")]
+const COLLECT_MACHO_FILETYPES: &[u32] = &[0x2, 0x6, 0x8];

@@ -349,15 +349,18 @@ mod real_macos {
 
     /// 廉价正过滤：只有"无扩展名"或扩展名属于 Mach-O 常见载体"的文件才值得
     /// 付出一次 `open()`+`read()` 去嗅探魔数。其余（文本/源码/配置/数据/媒体等）
-    /// 一律跳过，省下海量 `open` 系统调用——这是全盘收集阶段慢的首要原因。
+    /// 一律跳过，省下海量 `open` 系统调用。
     ///
-    /// 覆盖范围说明：macOS 上真正的可执行 Mach-O 几乎都落在"无扩展名"（如
-    /// `/bin/ls`、`Foo.app/Contents/MacOS/Foo`、`Foo.framework/.../Foo`）或这些
-    /// 扩展名里；`.a` 静态库不是 Mach-O 魔数（以 `!<arch>` 开头），本来也不会被
-    /// 魔数判定收下，跳过它反而省一次 `open`。带其它奇怪扩展名的 Mach-O 在 macOS
-    /// 上极罕见，本过滤会跳过去；若日后需要扩面，往这个白名单里加扩展名即可。
+    /// 注意：`.o`（MH_OBJECT 目标文件）已从白名单移除——它们数量巨大却无法独立
+    /// 运行，是"扫描了大量非可执行程序"的主要噪声；配合 `is_collectable_macho` 的
+    /// `filetype` 过滤，这类纯构建中间产物连 `open` 都不会触发（既不被白名单收下、
+    /// 也不在保留的 filetype 之列）。其余扩展名都是会被实际加载执行的 Mach-O 载体
+    /// （dylib/so 动态库、bundle/kext 包、macho 裸二进制、node 原生插件）。`.a` 静态
+    /// 库不是 Mach-O 魔数（以 `!<arch>` 开头），本就不会被收下，跳过反而省一次
+    /// `open`。带其它奇怪扩展名的 Mach-O 在 macOS 上极罕见，本过滤会跳过去；要扩面
+    /// 往这个白名单里加扩展名即可。
     const MACHO_LIKELY_EXTENSIONS: &[&str] = &[
-        "dylib", "so", "o", "bundle", "kext", "macho", "lib", "node",
+        "dylib", "so", "bundle", "kext", "macho", "node",
     ];
 
     /// 遍历单个根目录，把匹配的 Mach-O 可执行文件边发现边写进 `writer`。返回
@@ -383,7 +386,17 @@ mod real_macos {
         let walker = WalkDir::new(root)
             .follow_links(false)
             .into_iter()
-            .filter_entry(|e| !is_excluded(e.path(), is_system_root));
+            .filter_entry(|e| {
+                // 构建/版本控制中间产物目录：里面几乎没有"会被实际运行"的成品可执行
+                // 文件，却常含海量文件（Xcode `DerivedData` 满是 `.o`、`.git` 满是松散
+                // 对象），整棵剪掉既缩小收集集、又省下大量 stat / open。注意不放
+                // `build`/`target`/`node_modules` 等——它们可能含最终发布的成品可执行
+                // 文件，剪掉会有覆盖损失。
+                if e.file_type().is_dir() && is_build_artifact_dir(e.file_name()) {
+                    return false;
+                }
+                !is_excluded(e.path(), is_system_root)
+            });
         for entry in walker.filter_map(|e| e.ok()) {
             if cancel.load(Ordering::SeqCst) {
                 return false;
@@ -400,8 +413,10 @@ mod real_macos {
             if entry.metadata().map(|m| m.len()).unwrap_or(1) == 0 {
                 continue;
             }
-            // 实时读文件头判断是不是 Mach-O，避免把数百万个普通文件都塞进待扫列表。
-            if !super::super::is_macho_file(path) {
+            // 读文件头魔数 + `filetype`：只保留会被实际加载执行的 Mach-O（MH_EXECUTE
+            // / MH_DYLIB / MH_BUNDLE），丢弃纯构建中间产物 `.o`（MH_OBJECT）。避免把
+            // 数百万个非可执行文件塞进待扫列表、再喂给引擎。
+            if !super::super::is_collectable_macho(path) {
                 continue;
             }
             writer.push(path);
@@ -455,6 +470,13 @@ mod real_macos {
                 .iter()
                 .any(|ok| ok.eq_ignore_ascii_case(e)),
         }
+    }
+
+    /// 构建/版本控制中间产物目录名（见 `walk_root` 的 `filter_entry`）：整棵剪掉，
+    /// 不下降、不 stat 内部的海量文件。只放"绝对不可能是发布成品可执行文件所在"的
+    /// 目录，避免覆盖损失。
+    fn is_build_artifact_dir(name: &std::ffi::OsStr) -> bool {
+        name == std::ffi::OsStr::new("DerivedData") || name == std::ffi::OsStr::new(".git")
     }
 
     /// 判断某个路径是否属于"不应纳入全盘扫描"的子树，配合 `filter_entry` 整棵剪掉。
