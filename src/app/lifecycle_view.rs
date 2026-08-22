@@ -59,6 +59,8 @@ fn poll_tray_events(tray: &Tray, core: &mut AppCore, lifecycle: &mut Lifecycle) 
                 core.quick.start(core.config.scan_removable_drives);
             }
             focus_requested = true;
+        } else if id == &tray.ids.optimize_pc {
+            crate::clv3000_plus::launch_or_open_releases();
         } else if id == &tray.ids.about {
             lifecycle.about_open = true;
             lifecycle.about_standalone = true;

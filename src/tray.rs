@@ -1,4 +1,4 @@
-//! 托盘图标 + 右键菜单：显示主窗口 / 闪电扫描 / 关于 / 退出。
+//! 托盘图标 + 右键菜单：显示主窗口 / 闪电扫描 / Optimize PC / 关于 / 退出。
 //!
 //! 集成方式说明：按 tray-icon 官方文档推荐，正规做法是用
 //! `TrayIconEvent::set_event_handler` 配合 winit 的 `EventLoopProxy` 把事件转发进
@@ -15,6 +15,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 pub struct TrayMenuIds {
     pub show: MenuId,
     pub quick_scan: MenuId,
+    pub optimize_pc: MenuId,
     pub about: MenuId,
     pub quit: MenuId,
 }
@@ -31,12 +32,14 @@ pub struct Tray {
 pub fn build(icon_rgba: Vec<u8>, icon_w: u32, icon_h: u32) -> anyhow::Result<Tray> {
     let show_item = MenuItem::new("Show Main Window", true, None);
     let quick_item = MenuItem::new("Quick Scan", true, None);
+    let optimize_item = MenuItem::new("Optimize PC", true, None);
     let about_item = MenuItem::new("About", true, None);
     let quit_item = MenuItem::new("Quit", true, None);
 
     let ids = TrayMenuIds {
         show: show_item.id().clone(),
         quick_scan: quick_item.id().clone(),
+        optimize_pc: optimize_item.id().clone(),
         about: about_item.id().clone(),
         quit: quit_item.id().clone(),
     };
@@ -45,6 +48,7 @@ pub fn build(icon_rgba: Vec<u8>, icon_w: u32, icon_h: u32) -> anyhow::Result<Tra
     menu.append_items(&[
         &show_item,
         &quick_item,
+        &optimize_item,
         &PredefinedMenuItem::separator(),
         &about_item,
         &quit_item,

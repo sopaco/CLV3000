@@ -5,6 +5,7 @@ mod about_dialog;
 mod app;
 mod autostart;
 mod clamav_info;
+mod clv3000_plus;
 mod config;
 mod context_menu;
 mod icon_data;
@@ -191,6 +192,8 @@ fn wait_in_tray(tray: &tray::Tray) -> Option<InitialMode> {
                 return Some(InitialMode::ShowWindow);
             } else if id == &tray.ids.quick_scan {
                 return Some(InitialMode::QuickScan);
+            } else if id == &tray.ids.optimize_pc {
+                crate::clv3000_plus::launch_or_open_releases();
             } else if id == &tray.ids.about {
                 return Some(InitialMode::About);
             } else if id == &tray.ids.quit {
