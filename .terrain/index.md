@@ -35,6 +35,7 @@ source: .
     - bundle-macos.sh
   - AGENTS.md
   - assets/
+    - snapshots/
     - backgrounds/
     - icons/
     - introduce_clv3000.png
@@ -59,6 +60,7 @@ source: .
     - about_dialog.rs
     - localtime.rs
     - main.rs
+    - clv3000_plus.rs
     - lifecycle.rs
     - quarantine.rs
     - widgets.rs
