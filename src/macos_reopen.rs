@@ -15,14 +15,67 @@
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
 mod imp {
+    use std::ptr::NonNull;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Once;
 
+    use block2::RcBlock;
     use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+    use objc2_app_kit::{
+        NSApplication, NSApplicationActivationPolicy, NSApplicationDidBecomeActiveNotification,
+    };
+    use objc2_foundation::{NSNotification, NSNotificationCenter};
 
     /// 当前实际生效的"是否 accessory"。用来避免每帧都去调一次 `setActivationPolicy`
     /// （那会引起不必要的状态切换 / 闪烁），只在状态真的要变时才调。
     static IS_ACCESSORY: AtomicBool = AtomicBool::new(false);
+    /// 主窗口是否已缩到托盘（供 Dock 点击 / 切回 App 的通知回调判断）。
+    static HIDDEN_TO_TRAY: AtomicBool = AtomicBool::new(false);
+    static INSTALL_REOPEN_HANDLER: Once = Once::new();
+
+    /// 隐藏到托盘时同步调用：立刻切 Accessory（去掉 Dock 图标）并标记托盘态。
+    pub fn enter_tray_mode() {
+        HIDDEN_TO_TRAY.store(true, Ordering::Relaxed);
+        //  bust 缓存，确保 `set_accessory(true)` 真的会再打一次 AppKit。
+        IS_ACCESSORY.store(false, Ordering::Relaxed);
+        set_accessory(true);
+    }
+
+    /// 显示主窗口时同步调用：切回 Regular 并清掉托盘标记。
+    pub fn leave_tray_mode() {
+        HIDDEN_TO_TRAY.store(false, Ordering::Relaxed);
+        IS_ACCESSORY.store(true, Ordering::Relaxed);
+        set_accessory(false);
+    }
+
+    /// winit 0.30 不处理 Dock 图标点击；Accessory 未生效时 Dock 会留幽灵图标。
+    /// 监听 `NSApplicationDidBecomeActive`，在托盘态被用户点 Dock / Cmd+Tab 切回时
+    /// 走与 `--show` 相同的 `wakeup::push_show_request` 路径。
+    pub fn install_reopen_handler() {
+        INSTALL_REOPEN_HANDLER.call_once(|| {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let block = RcBlock::new(|_notification: NonNull<NSNotification>| {
+                if HIDDEN_TO_TRAY.load(Ordering::Relaxed) {
+                    crate::wakeup::push_show_request();
+                }
+            });
+            let center = NSNotificationCenter::defaultCenter();
+            // SAFETY: 通知名是 AppKit 常量；`block` 是 `'static` 的 RcBlock。
+            let observer = unsafe {
+                center.addObserverForName_object_queue_usingBlock(
+                    Some(NSApplicationDidBecomeActiveNotification),
+                    None,
+                    None,
+                    &block,
+                )
+            };
+            // 观察者须活到进程结束；`NSNotificationCenter` 不会强引用 block 观察者。
+            std::mem::forget(observer);
+            let _ = mtm;
+        });
+    }
 
     /// 设置 App 的激活策略：
     /// - `accessory = true`：切到 `Accessory`（无 Dock 图标、无前台菜单），用于托盘态；
@@ -193,6 +246,9 @@ mod imp {
     };
 
     pub fn set_accessory(_accessory: bool) {}
+    pub fn enter_tray_mode() {}
+    pub fn leave_tray_mode() {}
+    pub fn install_reopen_handler() {}
     pub fn is_miniaturized() -> bool {
         false
     }
@@ -303,6 +359,9 @@ mod imp {
 #[allow(dead_code)]
 mod imp {
     pub fn set_accessory(_accessory: bool) {}
+    pub fn enter_tray_mode() {}
+    pub fn leave_tray_mode() {}
+    pub fn install_reopen_handler() {}
     pub fn is_miniaturized() -> bool {
         false
     }

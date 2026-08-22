@@ -13,21 +13,30 @@
 //! 右键菜单"用 CLV3000 扫描"/`--scan-path` 冷启动时，如果已经有一个实例在跑，
 //! 不能像过去那样简单弹"已经在运行"就退出——那样右键菜单等于什么也没做。第二个
 //! 进程改成把扫描路径转发给已经在跑的那个实例（`forward_scan_request`），主实例
-//! 起一个后台监听（`start_scan_request_listener`，须在 `main` 里、`wakeup::init()`
+//! 起一个后台监听（`start_request_listeners`，须在 `main` 里、`wakeup::init()`
 //! 之后尽早调用——不依赖 eframe 是否已启动，Windows tray-only 下可能长期停在
 //! `main::wait_in_tray` 里，此时也必须能收到转发请求）把收到的路径推进
 //! `wakeup::push_scan_request`，跟托盘/菜单事件走同一套"全局队列 + ping()"唤醒
-//! 机制，`wait_in_tray`（eframe 未启动）和 `App::logic`（eframe 已启动）都从那个
-//! 队列排空，不用关心当前处于哪个阶段。
+//! 机制。
+//!
+//! ## 显示主窗口（`forward_show_request`）
+//!
+//! `--show` 走同一套 IPC 唤醒路径，但只推进 `wakeup::push_show_request`，不触发扫描。
 
 use std::path::Path;
 
 #[cfg(windows)]
-pub use real::{acquire, forward_scan_request, start_scan_request_listener};
+pub use real::{
+    acquire, forward_scan_request, forward_show_request, start_request_listeners,
+};
 #[cfg(target_os = "macos")]
-pub use macos::{acquire, forward_scan_request, start_scan_request_listener};
+pub use macos::{
+    acquire, forward_scan_request, forward_show_request, start_request_listeners,
+};
 #[cfg(not(any(windows, target_os = "macos")))]
-pub use mock::{acquire, forward_scan_request, start_scan_request_listener};
+pub use mock::{
+    acquire, forward_scan_request, forward_show_request, start_request_listeners,
+};
 
 #[cfg(windows)]
 mod real {
@@ -42,6 +51,7 @@ mod real {
     /// 文件 + 一个信号量级的事件已经足够，比手写 `CreateNamedPipeW`/
     /// `ConnectNamedPipe` 读写循环简单得多。
     const EVENT_NAME: &str = "CLV3000_ScanRequestEvent";
+    const SHOW_EVENT_NAME: &str = "CLV3000_ShowRequestEvent";
 
     /// 如果已经有一个实例在跑，返回 `false`（调用者应该直接退出并提示用户）。
     pub fn acquire() -> bool {
@@ -81,6 +91,11 @@ mod real {
         unsafe { CreateEventW(None, false, false, &name) }.ok()
     }
 
+    fn open_or_create_show_event() -> Option<HANDLE> {
+        let name = HSTRING::from(SHOW_EVENT_NAME);
+        unsafe { CreateEventW(None, false, false, &name) }.ok()
+    }
+
     /// 副实例调用：把扫描路径写进转发文件、`SetEvent` 唤醒主实例的监听线程。
     /// 最佳努力——事件对象打不开（极端情况）就静默失败，调用者（`main.rs`）此时
     /// 应该退回"已经在运行"提示，不会导致用户点了右键菜单毫无反馈。
@@ -95,23 +110,31 @@ mod real {
         unsafe { SetEvent(event) }.is_ok()
     }
 
-    /// 主实例调用：起一个后台线程阻塞等待具名 Event，被唤醒就读转发文件、清空、
-    /// 推进 `wakeup` 的全局队列。必须在 `wakeup::init()` 之后、且不依赖 eframe 是否
-    /// 已启动——Windows tray-only 下进程可能长期停在 `main::wait_in_tray` 里。
-    pub fn start_scan_request_listener() {
-        let Some(event) = open_or_create_event() else {
-            return;
+    /// 副实例调用：`SetEvent` 唤醒主实例的 `--show` 监听线程。
+    pub fn forward_show_request() -> bool {
+        let Some(event) = open_or_create_show_event() else {
+            return false;
         };
-        // `HANDLE` 内部是 `*mut c_void`，裸指针默认不是 `Send`——但这只是一个不透明的
-        // 内核对象句柄（一个整数），不是真的要跨线程共享指向的内存，发送裸整数值
-        // 过去、在新线程里用同一个数值重建 `HANDLE` 是安全的。
+        // SAFETY: `event` 是刚打开的有效句柄。
+        unsafe { SetEvent(event) }.is_ok()
+    }
+
+    fn spawn_event_listener(event: HANDLE, on_wake: fn()) {
         let event_value = event.0 as isize;
         std::thread::spawn(move || {
             let event = HANDLE(event_value as *mut _);
             loop {
-                // SAFETY: `event` 句柄在这个线程的生命周期内保持有效（永不 close，
-                // 随进程退出自动释放，跟 Mutex 句柄的处理方式一致）。
+                // SAFETY: `event` 句柄在这个线程的生命周期内保持有效。
                 let _ = unsafe { WaitForSingleObject(event, INFINITE) };
+                on_wake();
+            }
+        });
+    }
+
+    /// 主实例调用：起扫描路径与 `--show` 两条监听线程。
+    pub fn start_request_listeners() {
+        if let Some(event) = open_or_create_event() {
+            spawn_event_listener(event, || {
                 let path = request_file();
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     let trimmed = content.trim();
@@ -120,8 +143,11 @@ mod real {
                     }
                 }
                 let _ = std::fs::remove_file(&path);
-            }
-        });
+            });
+        }
+        if let Some(event) = open_or_create_show_event() {
+            spawn_event_listener(event, crate::wakeup::push_show_request);
+        }
     }
 }
 
@@ -136,6 +162,8 @@ mod macos {
     use std::sync::OnceLock;
 
     const SOCK_NAME: &str = "clv3000.sock";
+    /// macOS Unix socket 上区分 `--show` 与 `--scan-path` 的魔数标记（不是合法路径）。
+    const SHOW_MARKER: &str = "__CLV3000_SHOW__";
 
     /// 绑定成功后的监听 socket，长期保活（原来是 `mem::forget`，现在存进静态里
     /// 是为了 `start_scan_request_listener` 能拿到它去起 accept 循环）。
@@ -189,9 +217,16 @@ mod macos {
         stream.write_all(path.to_string_lossy().as_bytes()).is_ok()
     }
 
-    /// 主实例调用：从 `acquire()` 绑定好的监听 socket 起一个 accept 循环线程，把
-    /// 每个连接读到的字节当路径转发进 `wakeup` 的全局队列。
-    pub fn start_scan_request_listener() {
+    /// 副实例调用：经 Unix socket 发送 `--show` 魔数标记。
+    pub fn forward_show_request() -> bool {
+        let Ok(mut stream) = UnixStream::connect(sock_path()) else {
+            return false;
+        };
+        stream.write_all(SHOW_MARKER.as_bytes()).is_ok()
+    }
+
+    /// 主实例调用：从 `acquire()` 绑定好的监听 socket 起一个 accept 循环线程。
+    pub fn start_request_listeners() {
         let Some(listener) = LISTENER.get() else {
             return;
         };
@@ -204,7 +239,9 @@ mod macos {
                 let mut buf = String::new();
                 if stream.read_to_string(&mut buf).is_ok() {
                     let trimmed = buf.trim();
-                    if !trimmed.is_empty() {
+                    if trimmed == SHOW_MARKER {
+                        crate::wakeup::push_show_request();
+                    } else if !trimmed.is_empty() {
                         crate::wakeup::push_scan_request(std::path::PathBuf::from(trimmed));
                     }
                 }
@@ -265,5 +302,9 @@ mod mock {
         false
     }
 
-    pub fn start_scan_request_listener() {}
+    pub fn forward_show_request() -> bool {
+        false
+    }
+
+    pub fn start_request_listeners() {}
 }

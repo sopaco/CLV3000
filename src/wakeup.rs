@@ -39,6 +39,8 @@ static MENU_EVENTS: OnceLock<(mpsc::Sender<MenuEvent>, Mutex<mpsc::Receiver<Menu
 /// `App::logic`（eframe 已启动）都从这里排空，不用关心当前是不是已经进了 eframe。
 static SCAN_REQUESTS: OnceLock<(mpsc::Sender<PathBuf>, Mutex<mpsc::Receiver<PathBuf>>)> =
     OnceLock::new();
+/// `--show` 转发过来的"只显示主窗口"请求（见 `single_instance::forward_show_request`）。
+static SHOW_REQUESTS: OnceLock<(mpsc::Sender<()>, Mutex<mpsc::Receiver<()>>)> = OnceLock::new();
 
 /// 起两条转发线程（幂等，重复调用直接返回）。必须在 `main` 开头、托盘创建之前调用。
 pub fn init() {
@@ -51,6 +53,8 @@ pub fn init() {
     let _ = MENU_EVENTS.set((menu_tx, Mutex::new(menu_rx)));
     let (scan_tx, scan_rx) = mpsc::channel();
     let _ = SCAN_REQUESTS.set((scan_tx, Mutex::new(scan_rx)));
+    let (show_tx, show_rx) = mpsc::channel();
+    let _ = SHOW_REQUESTS.set((show_tx, Mutex::new(show_rx)));
 
     // 托盘图标事件（双击等）。
     std::thread::spawn(|| {
@@ -132,4 +136,17 @@ pub fn push_scan_request(path: PathBuf) {
 /// UI 帧 / `wait_in_tray` 里轮询转发过来的扫描请求。
 pub fn scan_requests() -> &'static Mutex<mpsc::Receiver<PathBuf>> {
     &SCAN_REQUESTS.get().expect("wakeup::init not called").1
+}
+
+/// 由 `single_instance` 的转发监听线程调用：推进"显示主窗口"请求并唤醒 UI。
+pub fn push_show_request() {
+    if let Some((tx, _)) = SHOW_REQUESTS.get() {
+        let _ = tx.send(());
+        ping();
+    }
+}
+
+/// UI 帧 / `wait_in_tray` 里轮询转发过来的 `--show` 请求。
+pub fn show_requests() -> &'static Mutex<mpsc::Receiver<()>> {
+    &SHOW_REQUESTS.get().expect("wakeup::init not called").1
 }
