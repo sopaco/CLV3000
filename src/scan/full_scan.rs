@@ -347,17 +347,20 @@ mod real_macos {
     use std::sync::mpsc::Sender;
     use walkdir::WalkDir;
 
-    /// 明显不可能是可执行文件的扩展名，在 open+读魔数之前先按名字挡掉——一次
-    /// 字符串比较换掉一次系统调用，全盘扫描里这类文件占绝大多数（图片/文档/
-    /// 媒体/数据文件），是 walk 阶段最便宜的一刀。真正的可执行文件（包括无
-    /// 扩展名的）仍然会走到魔数判断，不依赖这个列表保证不漏判。
-    const NEVER_EXECUTABLE_EXTENSIONS: &[&str] = &[
-        "png", "jpg", "jpeg", "gif", "webp", "heic", "bmp", "tiff", "svg", "ico",
-        "mp3", "mp4", "mov", "avi", "m4a", "m4v", "wav", "flac",
-        "pdf", "txt", "md", "json", "xml", "html", "htm", "css", "js",
-        "plist", "strings", "nib", "storyboard", "xib", "car",
-        "zip", "gz", "tar", "dmg", "pkg",
-        "log", "db", "sqlite", "sqlite3",
+    /// 廉价正过滤：只有"无扩展名"或扩展名属于 Mach-O 常见载体"的文件才值得
+    /// 付出一次 `open()`+`read()` 去嗅探魔数。其余（文本/源码/配置/数据/媒体等）
+    /// 一律跳过，省下海量 `open` 系统调用。
+    ///
+    /// 注意：`.o`（MH_OBJECT 目标文件）已从白名单移除——它们数量巨大却无法独立
+    /// 运行，是"扫描了大量非可执行程序"的主要噪声；配合 `is_collectable_macho` 的
+    /// `filetype` 过滤，这类纯构建中间产物连 `open` 都不会触发（既不被白名单收下、
+    /// 也不在保留的 filetype 之列）。其余扩展名都是会被实际加载执行的 Mach-O 载体
+    /// （dylib/so 动态库、bundle/kext 包、macho 裸二进制、node 原生插件）。`.a` 静态
+    /// 库不是 Mach-O 魔数（以 `!<arch>` 开头），本就不会被收下，跳过反而省一次
+    /// `open`。带其它奇怪扩展名的 Mach-O 在 macOS 上极罕见，本过滤会跳过去；要扩面
+    /// 往这个白名单里加扩展名即可。
+    const MACHO_LIKELY_EXTENSIONS: &[&str] = &[
+        "dylib", "so", "bundle", "kext", "macho", "node",
     ];
 
     /// 遍历单个根目录，把匹配的 Mach-O 可执行文件边发现边写进 `writer`。返回
@@ -368,11 +371,13 @@ mod real_macos {
     /// `/System/Volumes` 这类整棵子树都要跳过的目录，WalkDir 仍会完整下降进去、
     /// 对每个文件都 stat 一遍，只是最后不收进结果——等于把这块子树白走了一遍。
     /// `filter_entry` 在返回 `false` 时直接不下降这个目录，整棵子树被剪掉。
-    /// `include_removable`：只有遍历磁盘根（`/`）时才需要靠这个排除 `/Volumes`；
-    /// 单目标遍历传 `true`，反正目标本身就是用户显式选中的目录，不该二次过滤。
+    /// `is_system_root`：`true` 表示正在遍历启动盘根 `/`，此时 `is_excluded` 会剪掉
+    /// `/Volumes`/`/Network`（可移动/网络挂载由 `local_drive_roots` 的显式根单独
+    /// 覆盖，避免重复扫描）；`false` 表示遍历的是某个可移动盘或用户显式选中的
+    /// 目录，不再二次剪枝 `/Volumes`、`/Network`。
     fn walk_root(
         root: &Path,
-        include_removable: bool,
+        is_system_root: bool,
         writer: &mut WalkListWriter,
         tx: &Sender<ScanEvent>,
         cancel: &CancelFlag,
@@ -381,7 +386,17 @@ mod real_macos {
         let walker = WalkDir::new(root)
             .follow_links(false)
             .into_iter()
-            .filter_entry(|e| !is_excluded(e.path(), include_removable));
+            .filter_entry(|e| {
+                // 构建/版本控制中间产物目录：里面几乎没有"会被实际运行"的成品可执行
+                // 文件，却常含海量文件（Xcode `DerivedData` 满是 `.o`、`.git` 满是松散
+                // 对象），整棵剪掉既缩小收集集、又省下大量 stat / open。注意不放
+                // `build`/`target`/`node_modules` 等——它们可能含最终发布的成品可执行
+                // 文件，剪掉会有覆盖损失。
+                if e.file_type().is_dir() && is_build_artifact_dir(e.file_name()) {
+                    return false;
+                }
+                !is_excluded(e.path(), is_system_root)
+            });
         for entry in walker.filter_map(|e| e.ok()) {
             if cancel.load(Ordering::SeqCst) {
                 return false;
@@ -390,11 +405,18 @@ mod real_macos {
                 continue;
             }
             let path = entry.path();
-            if has_never_executable_extension(path) {
+            // 廉价正过滤：扩展名不在候选范围的文件直接跳过，连 `open` 都不用做。
+            if !is_macho_candidate(path) {
                 continue;
             }
-            // 实时读文件头判断是不是 Mach-O，避免把数百万个普通文件都塞进待扫列表。
-            if !super::super::is_macho_file(path) {
+            // 空文件不可能是合法 Mach-O，跳过 `open`（省一次系统调用）。
+            if entry.metadata().map(|m| m.len()).unwrap_or(1) == 0 {
+                continue;
+            }
+            // 读文件头魔数 + `filetype`：只保留会被实际加载执行的 Mach-O（MH_EXECUTE
+            // / MH_DYLIB / MH_BUNDLE），丢弃纯构建中间产物 `.o`（MH_OBJECT）。避免把
+            // 数百万个非可执行文件塞进待扫列表、再喂给引擎。
+            if !super::super::is_collectable_macho(path) {
                 continue;
             }
             writer.push(path);
@@ -414,8 +436,8 @@ mod real_macos {
         let mut writer = WalkListWriter::create();
         let mut last_reported = 0usize;
 
-        for root in roots {
-            if !walk_root(&root, include_removable, &mut writer, tx, cancel, &mut last_reported) {
+        for (root, is_system_root) in roots {
+            if !walk_root(&root, is_system_root, &mut writer, tx, cancel, &mut last_reported) {
                 break;
             }
         }
@@ -432,59 +454,101 @@ mod real_macos {
     ) -> (PathBuf, usize) {
         let mut writer = WalkListWriter::create();
         let mut last_reported = 0usize;
-        walk_root(target, true, &mut writer, tx, cancel, &mut last_reported);
+        walk_root(target, false, &mut writer, tx, cancel, &mut last_reported);
         report_walk_progress(tx, writer.count, &mut last_reported);
         writer.finish()
     }
 
-    fn has_never_executable_extension(path: &std::path::Path) -> bool {
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| {
-                NEVER_EXECUTABLE_EXTENSIONS
-                    .iter()
-                    .any(|skip| skip.eq_ignore_ascii_case(e))
-            })
-            .unwrap_or(false)
+    /// 廉价正过滤：是否值得为这个路径付出一次 `open()` 去读魔数。
+    /// - 无扩展名 → 可能是二进制（命令、app 内部二进制、框架内部二进制）→ 候选。
+    /// - 扩展名在 `MACHO_LIKELY_EXTENSIONS` → 候选。
+    /// - 其它扩展名（文本/源码/配置/数据/媒体…）→ 直接跳过，不 `open`。
+    fn is_macho_candidate(path: &std::path::Path) -> bool {
+        match path.extension().and_then(|e| e.to_str()) {
+            None => true,
+            Some(e) => MACHO_LIKELY_EXTENSIONS
+                .iter()
+                .any(|ok| ok.eq_ignore_ascii_case(e)),
+        }
     }
 
-    /// 判断某个路径是否属于"不应纳入全盘扫描"的子树，配合 `filter_entry` 整棵剪掉：
-    /// - `/System/Volumes`：`/` 的数据卷镜像，firmlink 已经把 `/Users`、`/Applications`
-    ///   等呈现到 `/` 下，再走一遍会重复扫描同一批文件。
-    /// - `/private/var/vm`：休眠镜像/swap 文件所在目录，体积大且不含可执行文件。
-    /// - `/private/var/folders`：每用户临时目录/缓存，同上。
-    /// - `/.Spotlight-V100`：Spotlight 索引数据，不含可执行文件。
-    /// - `/net`、`/home`：autofs 自动挂载点，一旦下降进去可能触发实际的网络挂载
-    ///   并卡住整个 walk 线程。
-    /// - 不包含可移动盘时：`/Volumes`、`/Network` 下的其它挂载点也不要扫。
-    fn is_excluded(path: &std::path::Path, include_removable: bool) -> bool {
+    /// 构建/版本控制中间产物目录名（见 `walk_root` 的 `filter_entry`）：整棵剪掉，
+    /// 不下降、不 stat 内部的海量文件。只放"绝对不可能是发布成品可执行文件所在"的
+    /// 目录，避免覆盖损失。
+    fn is_build_artifact_dir(name: &std::ffi::OsStr) -> bool {
+        name == std::ffi::OsStr::new("DerivedData") || name == std::ffi::OsStr::new(".git")
+    }
+
+    /// 判断某个路径是否属于"不应纳入全盘扫描"的子树，配合 `filter_entry` 整棵剪掉。
+    /// `is_system_root` 标记当前正在遍历的是否为启动盘根 `/`：
+    /// - 启动盘根遍历时，剪掉 `/Volumes`、`/Network`（可移动/网络挂载由显式根单独
+    ///   覆盖，否则会重复扫描）；
+    /// - 可移动盘 / 单目标根遍历时（`is_system_root=false`），不再剪 `/Volumes`、
+    ///   `/Network`，保证这些盘自身能被完整扫到。
+    fn is_excluded(path: &std::path::Path, is_system_root: bool) -> bool {
         const ALWAYS_EXCLUDED: &[&str] = &[
+            // 数据卷镜像：firmlink 已把 `/Users`、`/Applications` 等呈现到 `/` 下，
+            // 再走一遍会重复扫描同一批文件。
             "/System/Volumes",
+            // 休眠镜像 / swap，体积大且不含可执行文件。
             "/private/var/vm",
+            // 每用户临时目录 / 缓存。
             "/private/var/folders",
+            // Spotlight 索引数据，不含可执行文件。
             "/.Spotlight-V100",
+            // autofs 自动挂载点，下降进去可能触发实际网络挂载并卡住整个 walk。
             "/net",
+            "/Network",
             "/home",
+            // 各类缓存 / 日志 / 派生数据：体积巨大且几乎不含可执行 Mach-O，
+            // 全量 `open` 嗅探魔数纯属浪费，也拖慢收集阶段。
+            "/System/Library/Caches",
+            "/Library/Caches",
+            "/private/var/db",
+            "/private/var/log",
+            "/private/var/spool",
         ];
         if ALWAYS_EXCLUDED.iter().any(|p| path.starts_with(p)) {
             return true;
         }
-        if !include_removable && (path.starts_with("/Volumes") || path.starts_with("/Network")) {
+        // 启动盘根遍历时剪掉可移动 / 网络挂载；它们由 `local_drive_roots` 的显式
+        // 根单独覆盖，避免与 `/` 遍历重复。
+        if is_system_root && (path.starts_with("/Volumes") || path.starts_with("/Network")) {
             return true;
         }
         false
     }
 
     /// 枚举磁盘根目录：macOS 启动盘永远是 `/`；可移动盘挂在 `/Volumes/` 下。
-    fn local_drive_roots(include_removable: bool) -> Vec<PathBuf> {
-        let mut roots = vec![PathBuf::from("/")];
+    /// 返回 `(根路径, 是否系统根)`——`is_system_root=true` 的 `/` 在遍历时会剪掉
+    /// `/Volumes`/`/Network`（这些由下面的显式可移动根覆盖，避免重复扫描），
+    /// `false` 的可移动/单目标根则不再二次剪枝。
+    fn local_drive_roots(include_removable: bool) -> Vec<(PathBuf, bool)> {
+        let mut roots = vec![(PathBuf::from("/"), true)];
         if include_removable {
             if let Ok(entries) = std::fs::read_dir("/Volumes") {
                 for e in entries.flatten() {
                     let p = e.path();
-                    if p.is_dir() {
-                        roots.push(p);
+                    // 只收真实挂载目录，跳过符号链接：启动盘会以 `Macintosh HD -> /`
+                    // 的 symlink 形式出现在 /Volumes 下，若跟随它会把整个系统盘再扫
+                    // 一遍（整盘被扫两遍）。`DirEntry::file_type()` 不跟随符号链接，
+                    // 所以 symlink→目录在这里 `is_symlink()` 为 true，自然被排除。
+                    let ft = match e.file_type() {
+                        Ok(ft) => ft,
+                        Err(_) => continue,
+                    };
+                    if ft.is_symlink() || !ft.is_dir() {
+                        continue;
                     }
+                    // 防御：解析后若等于启动盘 `/`（某些非 symlink 形式的自引用
+                    // 挂载），也跳过，避免重复扫描。
+                    if std::fs::canonicalize(&p)
+                        .map(|c| c.as_os_str() == std::ffi::OsStr::new("/"))
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    roots.push((p, false));
                 }
             }
         }
