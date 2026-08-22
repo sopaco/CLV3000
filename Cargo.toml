@@ -39,7 +39,8 @@ windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Th
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 objc2-app-kit = "0.3.2"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSProcessInfo", "NSString"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSProcessInfo", "NSString", "NSNotification"] }
+block2 = "0.6"
 
 # 给 exe 嵌图标资源用的（见 build.rs）。
 #

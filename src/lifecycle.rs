@@ -69,6 +69,13 @@ pub fn parse_start_tray_only() -> bool {
     std::env::args().any(|a| a == "--tray-only" || a == "--tray")
 }
 
+/// 解析命令行：支持 `--show` 唤起主窗口（不触发扫描）。
+/// 已有实例在跑时由 `single_instance::forward_show_request` 转发；冷启动时
+/// 覆盖 `--tray-only`，直接显示主窗口。
+pub fn parse_show() -> bool {
+    std::env::args().any(|a| a == "--show")
+}
+
 /// 解析命令行：支持 `--scan-path=<path>` 和 `--scan-path <path>`（下一个参数）
 /// 两种写法——Windows 右键菜单的 `command` 值用 `"<exe>" --scan-path "%1"`（后者），
 /// 手动命令行调试用等号写法更方便，两种都认。只取第一次出现的一个，多个

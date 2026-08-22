@@ -22,7 +22,7 @@ mod tray;
 mod wakeup;
 mod widgets;
 
-use lifecycle::{parse_scan_path, parse_start_tray_only, InitialMode};
+use lifecycle::{parse_scan_path, parse_show, parse_start_tray_only, InitialMode};
 
 fn main() {
     // ── 强制隔离提权子进程模式（仅 Windows）──────────────────────────
@@ -45,15 +45,19 @@ fn main() {
     // 扫描请求转发给正在跑的那个实例（见 `single_instance::forward_scan_request`）。
     // 所以要在 `acquire()` 判断之前先解析好这个参数。
     let scan_path_cli = parse_scan_path();
+    let show_cli = parse_show();
 
     if !single_instance::acquire() {
-        if let Some(path) = &scan_path_cli {
-            if !single_instance::forward_scan_request(path) {
-                // 转发失败（极少数情况，比如具名事件/socket 都打不开）：退回旧行为，
-                // 至少告诉用户"已经在运行"，而不是悄无声息什么都没发生。
-                single_instance::notice_already_running();
-            }
+        let forwarded = if let Some(path) = &scan_path_cli {
+            single_instance::forward_scan_request(path)
+        } else if show_cli {
+            single_instance::forward_show_request()
         } else {
+            false
+        };
+        if !forwarded {
+            // 转发失败（极少数情况，比如具名事件/socket 都打不开）：退回旧行为，
+            // 至少告诉用户"已经在运行"，而不是悄无声息什么都没发生。
             single_instance::notice_already_running();
         }
         return;
@@ -65,7 +69,7 @@ fn main() {
     // 起扫描请求转发监听（见模块文档）。必须在这里、`eframe::run_native` 之前调用
     // ——Windows `--tray-only` 下进程可能长期停在下面的 `wait_in_tray` 里，不依赖
     // eframe 是否已经启动。
-    single_instance::start_scan_request_listener();
+    single_instance::start_request_listeners();
 
     let start_tray_only = parse_start_tray_only();
 
@@ -93,7 +97,7 @@ fn main() {
     // 就一定会被创建并在首帧显示，`with_visible(false)` 拦不住。
     // macOS 的 tray-only 仍直接启动 eframe（隐藏），因为托盘事件投递依赖
     // NSApplication 事件循环，eframe 之外空等收不到托盘点击。
-    let initial = match resolve_initial_mode(&tray, start_tray_only, scan_path_cli) {
+    let initial = match resolve_initial_mode(&tray, start_tray_only, scan_path_cli, show_cli) {
         Some(i) => i,
         None => return, // tray-only 下用户从托盘退出
     };
@@ -133,11 +137,12 @@ fn resolve_initial_mode(
     tray: &Option<tray::Tray>,
     start_tray_only: bool,
     scan_path: Option<std::path::PathBuf>,
+    show_window: bool,
 ) -> Option<InitialMode> {
     if let Some(path) = scan_path {
         return Some(InitialMode::ScanPath(path));
     }
-    if !start_tray_only {
+    if show_window || !start_tray_only {
         return Some(InitialMode::ShowWindow);
     }
     #[cfg(windows)]
@@ -196,6 +201,14 @@ fn wait_in_tray(tray: &tray::Tray) -> Option<InitialMode> {
         // 这条路径——这个进程正停在 tray-only 的空等循环里，eframe 还没启动）。
         if let Ok(path) = crate::wakeup::scan_requests().lock().unwrap().try_recv() {
             return Some(InitialMode::ScanPath(path));
+        }
+        if crate::wakeup::show_requests()
+            .lock()
+            .unwrap()
+            .try_recv()
+            .is_ok()
+        {
+            return Some(InitialMode::ShowWindow);
         }
 
         // 2. PeekMessage 非阻塞排空消息队列，DispatchMessage 让 tray-icon/muda 的

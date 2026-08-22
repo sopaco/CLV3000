@@ -77,7 +77,12 @@ impl App {
         ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         self.window_hidden = true;
         self.activate_countdown = 0;
+        #[cfg(target_os = "macos")]
+        crate::macos_reopen::enter_tray_mode();
         trim_working_set();
+        // `reconcile_lifecycle` 在 `logic()` 里、`ui()` 之前跑——关窗发生在 `ui()`，
+        // 若不主动要下一帧，隐藏后可能永远等不到 `set_accessory(true)`。
+        ctx.request_repaint();
     }
 
     pub(super) fn poll_tray(&mut self) {
@@ -103,11 +108,32 @@ impl App {
             self.begin_path_scan(path);
         }
         if got_request {
-            self.lifecycle.mode = RunMode::ShowWindow;
-            self.lifecycle.about_open = false;
-            self.lifecycle.about_standalone = false;
-            self.activate_countdown = self.activate_countdown.max(ACTIVATE_FRAMES);
+            self.request_show_window();
         }
+    }
+
+    pub(super) fn poll_show_requests(&mut self) {
+        let mut got_request = false;
+        while crate::wakeup::show_requests()
+            .lock()
+            .unwrap()
+            .try_recv()
+            .is_ok()
+        {
+            got_request = true;
+        }
+        if got_request {
+            self.request_show_window();
+        }
+    }
+
+    fn request_show_window(&mut self) {
+        self.lifecycle.mode = RunMode::ShowWindow;
+        self.lifecycle.about_open = false;
+        self.lifecycle.about_standalone = false;
+        #[cfg(target_os = "macos")]
+        crate::macos_reopen::leave_tray_mode();
+        self.activate_countdown = self.activate_countdown.max(ACTIVATE_FRAMES);
     }
 
     fn begin_path_scan(&mut self, path: std::path::PathBuf) {
@@ -131,7 +157,7 @@ impl App {
         let desired_visible = mode == RunMode::ShowWindow || about_open;
         if desired_visible {
             #[cfg(target_os = "macos")]
-            crate::macos_reopen::set_accessory(false);
+            crate::macos_reopen::leave_tray_mode();
             let just_shown = self.window_hidden;
             if just_shown {
                 ctx.send_viewport_cmd(ViewportCommand::Visible(true));
@@ -165,14 +191,14 @@ impl App {
             self.window_hidden = true;
             self.activate_countdown = 0;
             #[cfg(target_os = "macos")]
-            crate::macos_reopen::set_accessory(true);
+            crate::macos_reopen::enter_tray_mode();
         } else {
             let still_visible = ctx.input(|i| i.viewport().visible().unwrap_or(false));
             if still_visible {
                 ctx.send_viewport_cmd(ViewportCommand::Visible(false));
             }
             #[cfg(target_os = "macos")]
-            crate::macos_reopen::set_accessory(true);
+            crate::macos_reopen::enter_tray_mode();
         }
     }
 

@@ -52,6 +52,8 @@ impl App {
     ) -> Self {
         theme::apply(&cc.egui_ctx);
         crate::wakeup::register_ctx(&cc.egui_ctx);
+        #[cfg(target_os = "macos")]
+        crate::macos_reopen::install_reopen_handler();
 
         let start_tray_only = matches!(initial, InitialMode::TrayOnly | InitialMode::About);
         let mut lifecycle = Lifecycle::new(start_tray_only);
@@ -78,6 +80,8 @@ impl App {
         let window_hidden = matches!(initial, InitialMode::TrayOnly | InitialMode::About);
         if matches!(initial, InitialMode::TrayOnly) {
             cc.egui_ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+            #[cfg(target_os = "macos")]
+            crate::macos_reopen::enter_tray_mode();
         }
 
         Self {
@@ -179,6 +183,7 @@ impl eframe::App for App {
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_tray();
+        self.poll_show_requests();
         self.poll_scan_requests();
         self.reconcile_lifecycle(ctx);
 
