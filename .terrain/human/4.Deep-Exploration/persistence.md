@@ -1,55 +1,111 @@
-# 深度探索：持久化域
+# Persistence Domain
 
-持久化域是 CLV3000 的"档案室"——它回答"程序该在哪里找文件、配置文件长什么样"这两个问题。这个域只有两个源文件（`src/config.rs` 与 `src/paths.rs`），却是全项目被依赖最多的基础域之一：几乎所有域都要问它"配置在哪""ClamAV 在哪""缓存在哪"。它的设计原则是"**一切路径可推导、一切配置人类可读**"——不依赖注册表存业务数据（注册表只用于自启与右键菜单），配置与缓存都是明文文件，紧急时可以用记事本手工救援。
+**Module path:** `src/config.rs`, `src/paths.rs`  
+**Generated:** 2026-08-25
 
-## 这个模块在做什么
+---
 
-三个职责：**（1）路径解析**——`paths.rs` 计算 exe 目录、应用数据目录、ClamAV 便携目录、数据库目录、缓存文件、隔离区目录等所有关键路径，并处理"便携分发"这一特殊需求（ClamAV 引擎随 exe 同目录携带）；**（2）配置读写**——`config.rs` 定义并读写 `config.toml`（扫描设置、忽略清单、上次扫描信息）；**（3）ClamAV 目录探测**——在便携目录与 macOS bundle 资源目录之间做出正确选择。
+## What This Module Does
 
-## 模块组成与组件职责
+CLV3000 needs to remember things between sessions — which threats you ignored, what's in quarantine, your last scan results, and where to find ClamAV on disk. The persistence layer handles all of this through simple, human-readable files rather than a database, keeping the application portable and lightweight enough for USB-stick deployment on older hardware.
 
-| 组件 | 源文件 | 职责 |
-|------|--------|------|
-| `Config` / `ScanSettings` | `src/config.rs` | 配置结构：扫描项、忽略清单、上次扫描信息 |
-| `ConfigError` | `src/config.rs` | 配置解析错误分类 |
-| `config::load` / `save` | `src/config.rs` | TOML 读写与默认值填充 |
-| `paths::exe_dir` | `src/paths.rs` | 当前 exe 所在目录（便携分发基准） |
-| `paths::app_data_dir` | `src/paths.rs` | 应用数据目录（`%APPDATA%\CLV3000` / `~/Library/Application Support/CLV3000`） |
-| `paths::clamav_dir` | `src/paths.rs` | 便携 ClamAV 目录（macOS 有 bundle 资源目录回退） |
-| `paths::bundle_resources_clamav_dir` | `src/paths.rs` | macOS `Contents/Resources/clamav` 路径反推 |
-| `resolved_clamav_database_dir` | `src/paths.rs` | 多候选解析出的病毒库目录 |
+---
 
-## 路径拓扑与数据流
+## Core Features
 
-CLV3000 的路径以 `exe_dir` 为便携分发基准，以 `app_data_dir` 为应用私有数据基准，两条线各有用途，互不混淆：
+1. **Configuration persistence** — `AppConfig` loads from and saves to TOML via serde. Missing or corrupt files gracefully default to empty config (`src/config.rs:47-61`).
+
+2. **Portable path resolution** — All paths derive from `exe_dir()` (executable location) and platform-standard app data directories, never from installation registry keys (`src/paths.rs:7-12`).
+
+3. **ClamAV discovery** — Resolves clamscan/freshclam locations with fallback chain: bundled directory → system install → PATH (`src/paths.rs:60-85`).
+
+4. **Ignore list management** — `is_ignored`, `add_ignored`, `remove_ignored` maintain the set of suppressed threat alerts (`src/config.rs:63-83`).
+
+5. **Quarantine record tracking** — `add_quarantined`, `remove_quarantined` persist isolation metadata alongside actual quarantined files (`src/config.rs:85-100`).
+
+---
+
+## Key Components
+
+| Component | File Path | Core Responsibility |
+|-----------|-----------|---------------------|
+| `AppConfig` | `src/config.rs:33` | Root configuration struct with scan history and lists |
+| `ScanRecord` | `src/config.rs:9` | Last scan timestamp, threat count, scanned count |
+| `IgnoredEntry` | `src/config.rs:17` | Path + virus name pair for suppressed alerts |
+| `QuarantineEntry` | `src/config.rs:25` | Quarantine metadata with stored filename |
+| `exe_dir` | `src/paths.rs:7` | Executable directory for portable-relative paths |
+| `app_data_dir` | `src/paths.rs` | Per-user persistent data location |
+| `clamav_dir` | `src/paths.rs:19` | Bundled ClamAV directory (with macOS .app bundle support) |
+| `config_file_path` | `src/paths.rs` | Full path to config.toml |
+| `quarantine_dir` | `src/paths.rs` | App-private quarantine storage |
+| `resolved_clamav_database_dir` | `src/paths.rs` | Active virus signature directory |
+
+---
+
+## Internal Data Flow
 
 ```mermaid
 flowchart TD
-    exe["exe_dir<br/>当前 exe 所在目录"]
-    ad["app_data_dir<br/>%APPDATA%\CLV3000<br/>或 ~/Library/Application Support/CLV3000"]
-
-    exe --> clamav0["clamav_dir<br/>便携 ClamAV 引擎目录"]
-    exe --> db0["resolved_clamav_database_dir<br/>病毒库目录"]
-    exe --> cache0["scan_cache.tsv / scan_cache_paths.tsv"]
-
-    ad --> config0["config.toml<br/>配置 + 忽略清单"]
-    ad --> cache1["scan_cache.tsv / scan_cache_paths.tsv<br/>基因缓存双表"]
-    ad --> qdir["隔离区目录<br/>quarantine_entries.json"]
-    ad --> cli["clamav 目录（若无便携）"]
+    A["App startup"] --> B["AppConfig::load<br/>src/config.rs:47"]
+    B --> C["Read config.toml<br/>paths::config_file_path"]
+    C --> D["AppCore holds config"]
+    D --> E["User action<br/>ignore/quarantine/setting"]
+    E --> F["Mutate AppConfig"]
+    F --> G["AppConfig::save<br/>src/config.rs:55"]
+    G --> H["Write config.toml"]
 ```
 
-关键点：缓存文件（TSV）与配置（TOML）都放在 `app_data_dir`，隔离区与记账也在 `app_data_dir`；`exe_dir` 只承载**可再分发的组件**（ClamAV 引擎）。macOS 上 `clamav_dir` 的解析顺序是：bundle 资源目录 `Contents/Resources/clamav` → exe 同目录，这是为了兼容"开发期 cargo run（exe 在 target/）与发布期 .app bundle（exe 在 Contents/MacOS/）"两种形态——前者的引擎无法放到 bundle 里，所以回退到 exe 同目录。
+**Path resolution flow:**
+1. `exe_dir()` → base for bundled `clamav/` directory
+2. `app_data_dir()` → base for config, cache, quarantine, IPC files
+3. Platform-specific: macOS checks `Contents/Resources/clamav` in .app bundles first
 
-## 关键组件拆解
+---
 
-**`Config`（`src/config.rs`）**包含三组数据：扫描设置（`ScanSettings`：是否含系统文件、是否记录上次扫描等）、忽略清单（`ignored_threats`，威胁处置"忽略"动作的落点）、上次扫描信息（`last_scans`，Dashboard 页展示）。`load()` 读 TOML 并在缺省时用默认值填充（`Default` 实现），`save()` 写回——全项目没有"配置中心"，任何域拿到 `Config` 的引用即可用。
+## Key Interfaces and Extension Points
 
-**`resolved_clamav_database_dir`（`src/paths.rs`）**是病毒库更新的关键依赖：它把"便携目录下的数据库目录""bundle 资源目录下的数据库目录"等候选按序探测，返回第一个存在的。`src/app/freshclam.rs` 的 `--datadir=` 与 `src/clamav_info.rs` 的版本探测都基于这个返回值——保证 UI 显示的病毒库版本与实际更新的数据库是**同一个目录**。
+- **`AppConfig::load() -> Self`** — Load or default on missing/corrupt file
+- **`AppConfig::save()`** — Atomic write of current state
+- **`paths::ensure_dir(path)`** — Create directory if missing before writes
+- **`paths::clamscan_available() -> bool`** — Pre-flight check before scan start
 
-**`ConfigError`（`src/config.rs`）**区分"文件不存在（首次运行，用默认值）"与"文件存在但解析失败（应提示用户）"两类错误。这个区分很重要：首次运行不该报错，但配置损坏时必须明确告知，否则用户会莫名丢忽略清单。
+---
 
-## 依赖关系与边界
+## Interactions with Other Modules
 
-本域依赖：`std::env`、`dirs`/`windows` crate（应用数据目录解析）、`toml` + `serde`（配置序列化）。它不依赖任何业务域，是全项目依赖树的**叶节点**之一；几乎所有域（scan/app/quarantine/freshclam/clamav_info）都依赖它。对外抽象：`Config`、`ScanSettings`、`ConfigError`、`paths` 模块的路径函数。
+| Module | Direction | Interface | Description |
+|--------|-----------|-----------|-------------|
+| app | depended | `AppConfig` | UI reads/writes config for all settings |
+| scan | depends | `app_data_dir`, clamav paths | Cache location, engine binary discovery |
+| quarantine | depends | `quarantine_dir`, `QuarantineEntry` | Storage location and metadata |
+| single_instance | depends | `app_data_dir` | IPC file and socket location |
+| scan/cache | depends | `app_data_dir/scan_cache.tsv` | Content hash cache file |
 
-关联文档：`6.数据库概览.md`（配置与 TSV 缓存的"准持久化"说明）、`4.Deep-Exploration/scan.md`（缓存文件落点）、`4.Deep-Exploration/system-integration.md`（引擎探测依赖 `resolved_clamav_database_dir`）。
+---
+
+## Role in Core Business Flows
+
+**On startup:** `AppCore::new()` calls `AppConfig::load()` to restore ignore list, quarantine records, and settings.
+
+**During scan:** `apply_scan_event` checks `config.is_ignored()` before adding threats to the UI list.
+
+**After quarantine:** Scan page calls `config.add_quarantined(entry)` which persists immediately via `save()`.
+
+---
+
+## Data Locations by Platform
+
+| Data | Windows | macOS |
+|------|---------|-------|
+| Config | `%APPDATA%\CLV3000\config.toml` | `~/Library/Application Support/CLV3000/config.toml` |
+| Scan cache | Same dir / `scan_cache.tsv` | Same |
+| Quarantine files | Same dir / `quarantine/` | Same |
+| Bundled ClamAV | `<exe_dir>\clamav\` | `<exe_dir>/clamav/` or `.app/Contents/Resources/clamav/` |
+
+---
+
+## Implementation Highlights
+
+- **Graceful degradation** — `toml::from_str().unwrap_or_default()` ensures corrupt config never crashes the app
+- **Immediate persistence** — Every mutation (ignore, quarantine, setting change) calls `save()` synchronously — no deferred writes that could lose data on crash
+- **Portable exe-relative paths** — `exe_dir()` enables USB-stick deployment where the install location changes every session

@@ -39,10 +39,12 @@ source: .
     - backgrounds/
     - icons/
     - introduce_clv3000.png
+  - CLAUDE.md
   - .codegraph/
     - codegraph.db
     - .gitignore
   - src/
+    - windows_chrome.rs
     - autostart.rs
     - icons.rs
     - app/
