@@ -28,9 +28,9 @@ pub struct App {
     pub(super) window_hidden: bool,
     pub(super) activate_countdown: u8,
     pub(super) size_intent: u8,
-    /// Windows：`reconcile_lifecycle` 发完视口命令后倒数，到 0 时在 `logic()` 里补 DWM 对齐。
+    /// Windows：`reconcile_lifecycle` 发完视口命令后的 DWM 帧布局调谐状态机（见 `windows_chrome`）。
     #[cfg(windows)]
-    pub(super) chrome_tune_countdown: u8,
+    pub(super) chrome_tune: crate::windows_chrome::ChromeTune,
     #[cfg(target_os = "macos")]
     pub(super) macos_was_miniaturized: bool,
     #[cfg(target_os = "macos")]
@@ -101,10 +101,10 @@ impl App {
             activate_countdown: 0,
             size_intent: 0,
             #[cfg(windows)]
-            chrome_tune_countdown: if window_hidden {
-                0
+            chrome_tune: if window_hidden {
+                Default::default()
             } else {
-                crate::windows_chrome::CHROME_TUNE_DELAY_FRAMES
+                crate::windows_chrome::ChromeTune::scheduled()
             },
             #[cfg(target_os = "macos")]
             macos_was_miniaturized: false,
@@ -188,7 +188,7 @@ impl eframe::App for App {
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         #[cfg(windows)]
-        crate::windows_chrome::poll_chrome_tune(&mut self.chrome_tune_countdown, frame);
+        crate::windows_chrome::poll_chrome_tune(&mut self.chrome_tune, ctx, frame);
         #[cfg(not(windows))]
         let _ = frame;
 

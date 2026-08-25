@@ -184,9 +184,10 @@ impl App {
                     let origin = ((monitor - egui::Vec2::from(size)) / 2.0).max(egui::Vec2::ZERO);
                     ctx.send_viewport_cmd(ViewportCommand::OuterPosition(origin.to_pos2()));
                 }
-                // winit 处理 Visible/InnerSize 后会刷新窗框；下一帧补 DWM 对齐，避免点击飘逸。
+                // winit 处理 Visible/InnerSize 后会刷新窗框；随后做一次样式调谐，
+                // 修复 DWM 按旧帧布局错位合成客户区的问题（见 windows_chrome.rs）。
                 #[cfg(windows)]
-                crate::windows_chrome::schedule_chrome_tune(&mut self.chrome_tune_countdown);
+                crate::windows_chrome::schedule_chrome_tune(&mut self.chrome_tune);
             }
         } else if !self.window_hidden {
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
