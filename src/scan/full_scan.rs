@@ -525,31 +525,31 @@ mod real_macos {
     /// `false` 的可移动/单目标根则不再二次剪枝。
     fn local_drive_roots(include_removable: bool) -> Vec<(PathBuf, bool)> {
         let mut roots = vec![(PathBuf::from("/"), true)];
-        if include_removable {
-            if let Ok(entries) = std::fs::read_dir("/Volumes") {
-                for e in entries.flatten() {
-                    let p = e.path();
-                    // 只收真实挂载目录，跳过符号链接：启动盘会以 `Macintosh HD -> /`
-                    // 的 symlink 形式出现在 /Volumes 下，若跟随它会把整个系统盘再扫
-                    // 一遍（整盘被扫两遍）。`DirEntry::file_type()` 不跟随符号链接，
-                    // 所以 symlink→目录在这里 `is_symlink()` 为 true，自然被排除。
-                    let ft = match e.file_type() {
-                        Ok(ft) => ft,
-                        Err(_) => continue,
-                    };
-                    if ft.is_symlink() || !ft.is_dir() {
-                        continue;
-                    }
-                    // 防御：解析后若等于启动盘 `/`（某些非 symlink 形式的自引用
-                    // 挂载），也跳过，避免重复扫描。
-                    if std::fs::canonicalize(&p)
-                        .map(|c| c.as_os_str() == std::ffi::OsStr::new("/"))
-                        .unwrap_or(false)
-                    {
-                        continue;
-                    }
-                    roots.push((p, false));
+        if include_removable
+            && let Ok(entries) = std::fs::read_dir("/Volumes")
+        {
+            for e in entries.flatten() {
+                let p = e.path();
+                // 只收真实挂载目录，跳过符号链接：启动盘会以 `Macintosh HD -> /`
+                // 的 symlink 形式出现在 /Volumes 下，若跟随它会把整个系统盘再扫
+                // 一遍（整盘被扫两遍）。`DirEntry::file_type()` 不跟随符号链接，
+                // 所以 symlink→目录在这里 `is_symlink()` 为 true，自然被排除。
+                let ft = match e.file_type() {
+                    Ok(ft) => ft,
+                    Err(_) => continue,
+                };
+                if ft.is_symlink() || !ft.is_dir() {
+                    continue;
                 }
+                // 防御：解析后若等于启动盘 `/`（某些非 symlink 形式的自引用
+                // 挂载），也跳过，避免重复扫描。
+                if std::fs::canonicalize(&p)
+                    .map(|c| c.as_os_str() == std::ffi::OsStr::new("/"))
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                roots.push((p, false));
             }
         }
         roots

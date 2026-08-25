@@ -7,7 +7,6 @@ pub mod colors {
 
     pub const BG_APP: Color32 = Color32::from_rgb(10, 13, 18);
     pub const BG_SIDEBAR: Color32 = Color32::from_rgb(6, 8, 11);
-    #[cfg(not(windows))]
     pub const BG_TITLEBAR: Color32 = Color32::from_rgb(8, 10, 14);
     pub const BG_CARD: Color32 = Color32::from_rgb(18, 22, 29);
     pub const BORDER: Color32 = Color32::from_rgb(34, 40, 50);
@@ -20,8 +19,6 @@ pub mod colors {
     pub const ACCENT_BLUE_BG: Color32 = Color32::from_rgb(17, 50, 71);
 
     pub const GREEN: Color32 = Color32::from_rgb(34, 197, 94);
-    #[allow(dead_code)]
-    pub const GREEN_DIM_BG: Color32 = Color32::from_rgb(16, 40, 27);
 
     pub const RED: Color32 = Color32::from_rgb(239, 68, 68);
     pub const RED_BG: Color32 = Color32::from_rgb(42, 20, 22);
@@ -146,19 +143,7 @@ pub fn paint_dotted_background(
     painter.image(tile.id(), rect, uv, Color32::WHITE);
 }
 
-/// 圆角矩形卡片背景，带边框，供各页面复用。
-/// 目前 action_button 已经改成自己量尺寸 + 手动画背景（不能直接用 Frame，见 app.rs
-/// 里的说明），这个函数暂时没有调用点了，但仍是一个好用的通用卡片样式，先保留。
-#[allow(dead_code)]
-pub fn card_frame() -> egui::Frame {
-    egui::Frame::default()
-        .fill(colors::BG_CARD)
-        .stroke(Stroke::new(1.0, colors::BORDER))
-        .corner_radius(12.0)
-        .inner_margin(egui::Margin::same(16))
-}
-
-#[allow(dead_code)]
+/// 按百分比取强调色：正常蓝、偏高黄、超阈值红。
 pub fn accent_for(cpu_or_mem_percent: f32) -> Color32 {
     if cpu_or_mem_percent > 85.0 {
         colors::RED

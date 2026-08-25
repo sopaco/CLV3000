@@ -1,4 +1,4 @@
-//! 窗口"外壳"：自绘标题栏（非 Windows）、左侧导航栏、底部资源条。跟四个页面
+//! 窗口"外壳"：自绘标题栏、左侧导航栏、底部资源条。跟四个页面
 //! 的业务内容无关，是每个页面都共用的固定框架。
 
 use super::{Page, App};
@@ -6,14 +6,10 @@ use crate::icons;
 use crate::sysmon::ResourceSample;
 use crate::theme::{self, colors};
 use eframe::egui;
-use egui::{Stroke, Vec2};
-#[cfg(not(windows))]
-use egui::ViewportCommand;
+use egui::{Stroke, Vec2, ViewportCommand};
 
-#[cfg(not(windows))]
 pub(super) const TITLE_BAR_HEIGHT: f32 = 44.0;
 
-#[cfg(not(windows))]
 pub(super) fn title_bar(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
@@ -95,7 +91,6 @@ pub(super) fn title_bar(
         });
 }
 
-#[cfg(not(windows))]
 fn title_bar_button(
     ui: &mut egui::Ui,
     rect: egui::Rect,

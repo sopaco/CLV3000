@@ -111,9 +111,7 @@ mod real {
         // 解析真实可用的病毒库目录：缓存以"所用库目录 + 版本"为身份，库变了自动失效。
         // 没有可用库目录时退回内置路径（此时扫描多半会因 clamscan 找不到库而报错，属正常拦截）。
         let resolved_db = paths::resolved_clamav_database_dir();
-        let effective_db = resolved_db
-            .clone()
-            .unwrap_or_else(|| paths::clamav_database_dir());
+        let effective_db = resolved_db.clone().unwrap_or_else(paths::clamav_database_dir);
         // 缓存不可用不会阻断扫描：open 内部失败会退化为空缓存，insert 失败也会静默忽略。
         let mut cache = cache::ScanCache::open(&cache_path, &effective_db);
 
@@ -183,11 +181,11 @@ mod real {
                 }
                 let mut paths = Vec::with_capacity(count);
                 if let Ok(f) = std::fs::File::open(&path) {
-                    for line in BufReader::new(f).lines().map_while(Result::ok) {
+                    super::super::for_each_line_skip_invalid_utf8(f, |line| {
                         if !line.is_empty() {
                             paths.push(PathBuf::from(line));
                         }
-                    }
+                    });
                 }
                 let _ = std::fs::remove_file(&path);
                 paths
@@ -499,11 +497,7 @@ mod real {
 
         let stderr_thread = std::thread::spawn(move || -> String {
             let Some(stderr) = stderr else { return String::new() };
-            BufReader::new(stderr)
-                .lines()
-                .filter_map(|l| l.ok())
-                .collect::<Vec<_>>()
-                .join("\n")
+            super::super::collect_lines_skip_invalid_utf8(stderr).join("\n")
         });
 
         let reader = BufReader::new(stdout);
@@ -573,12 +567,11 @@ mod real {
         stderr_output: Option<&str>,
     ) {
         let cancelled = cancel.load(Ordering::SeqCst);
-        if scanned == 0 {
-            if let Some(stderr) = stderr_output {
-                if !stderr.is_empty() {
-                    let _ = tx.send(ScanEvent::Error(stderr.to_string()));
-                }
-            }
+        if scanned == 0
+            && let Some(stderr) = stderr_output
+            && !stderr.is_empty()
+        {
+            let _ = tx.send(ScanEvent::Error(stderr.to_string()));
         }
         let _ = tx.send(ScanEvent::Finished {
             scanned,

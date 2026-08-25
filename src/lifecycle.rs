@@ -87,10 +87,10 @@ pub fn parse_scan_path() -> Option<std::path::PathBuf> {
             if !path.is_empty() {
                 return Some(std::path::PathBuf::from(path));
             }
-        } else if arg == "--scan-path" {
-            if let Some(next) = args.get(i + 1) {
-                return Some(std::path::PathBuf::from(next));
-            }
+        } else if arg == "--scan-path"
+            && let Some(next) = args.get(i + 1)
+        {
+            return Some(std::path::PathBuf::from(next));
         }
     }
     None

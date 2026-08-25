@@ -18,6 +18,7 @@ pub mod engine;
 pub mod full_scan;
 pub mod quick_scan;
 
+use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -169,3 +170,23 @@ pub fn is_collectable_macho(path: &std::path::Path) -> bool {
 /// 全盘扫描默认收集的 Mach-O `filetype`（见 `is_collectable_macho`）。
 #[cfg(target_os = "macos")]
 const COLLECT_MACHO_FILETYPES: &[u32] = &[0x2, 0x6, 0x8];
+
+/// 逐行读取：`InvalidData`（单行坏 UTF-8）跳过继续；其它 IO 错误停止。
+/// 比 `flatten`/`filter_map` 安全——不会在持续 IO 失败时死循环；比 `map_while` 宽容——
+/// 单行坏 UTF-8 不会截断后续有效行。
+pub(crate) fn for_each_line_skip_invalid_utf8<R: Read, F: FnMut(String)>(reader: R, mut f: F) {
+    for line_result in BufReader::new(reader).lines() {
+        let line = match line_result {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
+            Err(_) => break,
+        };
+        f(line);
+    }
+}
+
+pub(crate) fn collect_lines_skip_invalid_utf8<R: Read>(reader: R) -> Vec<String> {
+    let mut lines = Vec::new();
+    for_each_line_skip_invalid_utf8(reader, |l| lines.push(l));
+    lines
+}
