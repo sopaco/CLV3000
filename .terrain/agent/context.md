@@ -11,7 +11,7 @@ CLV3000 is a **portable on-demand virus-scanning desktop app** for Windows and m
 
 ## Architecture
 
-- **UI shell (egui/eframe main thread)**: `App` in `src/app/` holds all UI state, dispatches pages via `Page` enum; split into `app_shell.rs` (`ui()`/`logic()`, resource load/release) and `lifecycle_view.rs` (tray polling, scan/show request forwarding, `hide_to_tray`/window coordination); `logic()` polls tray/show/scan requests, samples sysmon, and uses repaint-on-scan wakeup; macOS scanning holds `ScanActivity` to keep progress animation alive.
+- **UI shell (egui/eframe main thread)**: `App` in `src/app/` holds all UI state, dispatches pages via `Page` enum; split into `app_shell.rs` (`ui()`/`logic()`, resource load/release) and `lifecycle_view.rs` (tray polling, scan/show request forwarding, `hide_to_tray`/window coordination); all platforms borderless + egui self-drawn title bar (`chrome.rs`, `about_dialog.rs`); Windows `windows_chrome` DWM client-area tune after viewport changes; `logic()` polls tray/show/scan requests, samples sysmon, repaint-on-scan wakeup; macOS scanning holds `ScanActivity` for progress animation.
 - **Scan backend (background threads)**: `src/scan/` uses `std::thread` + `mpsc::Sender<ScanEvent>` for progress/threat events; UI `try_recv` each frame; cancel via atomic `CancelFlag`.
 - **Desktop integration layer**: tray, single instance, autostart, context menu, macOS reopen/tray mode—independent modules with per-platform `cfg` implementations.
 - **Companion launcher**: `src/clv3000_plus.rs`—tray **Optimize PC** tries local CLV3000 Plus install, else opens Releases in the default browser.
@@ -35,12 +35,12 @@ CLV3000 is a **portable on-demand virus-scanning desktop app** for Windows and m
 
 | Module | Responsibility | Primary paths |
 |------|------|----------|
-| Entry / startup | CLI parsing (`--tray-only`/`--scan-path`/`--show`), viewport build, tray init | `src/main.rs`、`src/lifecycle.rs` |
+| Entry / startup | CLI parsing (`--tray-only`/`--scan-path`/`--show`), borderless viewport build (Win fixed size), tray init | `src/main.rs`、`src/lifecycle.rs` |
 | UI shell | App assembly, event loop, page dispatch, tray/request polling, resource lifecycle | `src/app/app_shell.rs`、`src/app/lifecycle_view.rs` |
 | Pages | Dashboard, quick/full scan, virus DB, settings | `src/app/pages/*`、`src/app/settings.rs` |
-| Window chrome | Sidebar, resource bar, title bar (non-Windows), Toast | `src/app/chrome.rs`、`src/widgets.rs`、`src/theme.rs` |
+| Window chrome | All-platform self-drawn title bar, sidebar, resource bar, Toast; Win DWM client-area tune | `src/app/chrome.rs`、`src/windows_chrome.rs`、`src/widgets.rs`、`src/theme.rs` |
 | Core state | `AppCore`, scan state machine (Idle/Enumerating/Scanning/Done), settings, virus DB state | `src/app/core/*` |
-| Scan orchestration | Prescan (blake3 hash + cache lookup), clamscan batching, result parse, cache write | `src/scan/engine.rs`、`src/scan/cache.rs` |
+| Scan orchestration | Prescan (blake3 hash + cache lookup), clamscan batching, result parse, cache write; UTF-8-tolerant line IO | `src/scan/engine.rs`、`src/scan/cache.rs`、`src/scan/mod.rs` |
 | Quick scan | Process/module enumeration (Win Toolhelp32 / macOS sysinfo) | `src/scan/quick_scan.rs` |
 | Full scan | Drive walk, executable/Mach-O filtering, streaming temp walklist | `src/scan/full_scan.rs`、`src/scan/mod.rs` |
 | Signature prefilter | WinVerifyTrust (PE/catalog), macOS codesign—skip trusted signatures | `src/scan/authenticode.rs` |
@@ -86,7 +86,7 @@ CLV3000 is a **portable on-demand virus-scanning desktop app** for Windows and m
 
 - **Language / version**: Rust, edition 2024; release size-optimized (`opt-level="s"`, `lto`, `panic="abort"`, `strip`).
 - **GUI**: egui / eframe 0.36 (glow renderer, default fonts, non-default features); no heavy custom UI deps.
-- **Windows native**: `windows` crate 0.62 (Toolhelp, WinTrust, Shell, registry, process mgmt); `winresource` in build.rs embeds three ico resources: main `icon_app`=ID 1, tray `icon_tray`=ID 2, extension pack `icon_expack_1`=ID 3.
+- **Windows native**: `windows` crate 0.62 (Toolhelp, WinTrust, Shell, registry, process mgmt, DWM); `raw-window-handle` 0.6 (HWND from eframe for `windows_chrome`); `winresource` in build.rs embeds three ico resources: main `icon_app`=ID 1, tray `icon_tray`=ID 2, extension pack `icon_expack_1`=ID 3.
 - **macOS native**: `objc2` family (AppKit/Foundation); `block2` for notification blocks; `macos_reopen.rs` handles tray mode, Dock reopen, `ScanActivity` during scans.
 - **Tray / menus**: `tray-icon` + `muda`.
 - **Scan external deps**: ClamAV portable dir (`clamscan`/`freshclam` + `database/*.cvd`), child-process only—**not** in-process engine loading.
@@ -105,11 +105,12 @@ CLV3000 is a **portable on-demand virus-scanning desktop app** for Windows and m
 
 | Concept | Location | Notes |
 |------|------|------|
-| Entry, CLI modes | `src/main.rs`、`src/lifecycle.rs` | `InitialMode`/`RunMode`; `parse_show` for `--show` |
-| App shell, event loop | `src/app/app_shell.rs`、`src/app/lifecycle_view.rs` | `ui()`/`logic()`; `hide_to_tray`/`reconcile_lifecycle`/tray + scan/show polling |
+| Entry, CLI modes | `src/main.rs`、`src/lifecycle.rs` | `InitialMode`/`RunMode`; `build_viewport` borderless (Win non-resizable) |
+| App shell, event loop | `src/app/app_shell.rs`、`src/app/lifecycle_view.rs` | `ui()`/`logic()`; `hide_to_tray`/`reconcile_lifecycle`; Win `poll_chrome_tune`/`schedule_chrome_tune` |
 | Pages & chrome | `src/app/pages/`、`src/app/chrome.rs`、`src/app/settings.rs` | `Page` dispatch; `settings_page` in settings.rs |
+| Windows chrome / DWM | `src/windows_chrome.rs` | `DwmExtendFrameIntoClientArea` + `SWP_FRAMECHANGED` after viewport cmds |
 | Core state | `src/app/core/mod.rs`、`scan_state.rs`、`settings_state.rs`、`virus_db.rs` | `AppCore`、`ScanPhase`、`apply_scan_event` |
-| Scan orchestration | `src/scan/engine.rs`、`src/scan/cache.rs` | Prescan, clamscan batching, cache |
+| Scan orchestration | `src/scan/engine.rs`、`src/scan/cache.rs`、`src/scan/mod.rs` | Prescan, clamscan batching, cache; `for_each_line_skip_invalid_utf8` |
 | Quick / full scan | `src/scan/quick_scan.rs`、`src/scan/full_scan.rs` | Process enum / drive walk; macOS `is_collectable_macho` in `scan/mod.rs` |
 | Signature prefilter | `src/scan/authenticode.rs` | WinVerifyTrust / codesign |
 | Virus DB update | `src/app/freshclam.rs`、`src/clamav_info.rs` | `freshclam` child, version parse |
@@ -118,4 +119,4 @@ CLV3000 is a **portable on-demand virus-scanning desktop app** for Windows and m
 | Tray / single instance / autostart / context menu | `src/tray.rs`、`src/single_instance.rs`、`src/autostart.rs`、`src/context_menu.rs` | Tray menu includes `optimize_pc`; `forward_show_request`; `start_request_listeners` |
 | Wakeup & macOS reopen | `src/wakeup.rs`、`src/macos_reopen.rs` | `push_show_request`/`show_requests`; `enter_tray_mode`/`leave_tray_mode`/`install_reopen_handler` |
 | Paths / config / monitor | `src/paths.rs`、`src/config.rs`、`src/sysmon.rs` | ClamAV dir resolve, TOML persistence, resource sampling |
-| Theme / icons / widgets | `src/theme.rs`、`src/icons.rs`、`src/icon_data.rs`、`src/widgets.rs`、`src/about_dialog.rs` | Design tokens, icons, shared controls |
+| Theme / icons / widgets | `src/theme.rs`、`src/icons.rs`、`src/icon_data.rs`、`src/widgets.rs`、`src/about_dialog.rs` | Design tokens, icons, shared controls; all-platform about title bar |
