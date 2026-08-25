@@ -306,26 +306,36 @@ fn scan_page(
             ui.add_space(10.0);
             ui.label(egui::RichText::new(err).color(colors::RED));
         }
+    });
+    state.content_height = content_height;
 
+    // 威胁列表不放进 `vertically_centered`：列表变长时居中逻辑会把整块顶出视口并裁切，
+    // 且无法滚动。上方状态区继续居中，列表单独占剩余高度并在内部滚动（同 settings 页）。
+    if !state.threats.is_empty() {
         ui.add_space(20.0);
+        let scroll_height = ui.available_height();
         let mut ignore_target: Option<usize> = None;
         let mut quarantine_target: Option<usize> = None;
-        for (i, threat) in state.threats.iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.add_space((ui.available_width() - 700.0).max(0.0) / 2.0);
-                ui.vertical(|ui| {
-                    ui.set_width(700.0_f32.min(ui.available_width()));
-                    let path_str = threat.path.display().to_string();
-                    let action = widgets::threat_card(ui, &threat.virus_name, &path_str);
-                    match action {
-                        ThreatAction::Ignore => ignore_target = Some(i),
-                        ThreatAction::Quarantine => quarantine_target = Some(i),
-                        ThreatAction::None => {}
-                    }
-                    ui.add_space(8.0);
-                });
+        egui::ScrollArea::vertical()
+            .max_height(scroll_height)
+            .show(ui, |ui| {
+                for (i, threat) in state.threats.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.add_space((ui.available_width() - 700.0).max(0.0) / 2.0);
+                        ui.vertical(|ui| {
+                            ui.set_width(700.0_f32.min(ui.available_width()));
+                            let path_str = threat.path.display().to_string();
+                            let action = widgets::threat_card(ui, &threat.virus_name, &path_str);
+                            match action {
+                                ThreatAction::Ignore => ignore_target = Some(i),
+                                ThreatAction::Quarantine => quarantine_target = Some(i),
+                                ThreatAction::None => {}
+                            }
+                            ui.add_space(8.0);
+                        });
+                    });
+                }
             });
-        }
         if let Some(i) = ignore_target {
             let t = state.threats.remove(i);
             config.add_ignored(t.path.display().to_string(), t.virus_name);
@@ -360,8 +370,7 @@ fn scan_page(
                 }
             }
         }
-    });
-    state.content_height = content_height;
+    }
 
     #[cfg(windows)]
     {
