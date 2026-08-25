@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -125,7 +125,6 @@ pub struct ScanCache {
     /// 不会绕过病毒库版本失效机制。
     path_index: HashMap<String, PathStamp>,
     current_rev: u64,
-    #[allow(dead_code)]
     disabled: bool,
 }
 
@@ -136,16 +135,16 @@ impl ScanCache {
         let current_rev = db_revision(db_dir).unwrap_or(0);
         let mut index: HashMap<String, Record> = HashMap::new();
         if let Ok(f) = File::open(path) {
-            for line in BufReader::new(f).lines().flatten() {
+            super::for_each_line_skip_invalid_utf8(f, |line| {
                 if line.is_empty() {
-                    continue;
+                    return;
                 }
                 let parts: Vec<&str> = line.split('\t').collect();
                 if parts.len() < 4 {
-                    continue;
+                    return;
                 }
-                let Ok(ts) = parts[2].parse::<i64>() else { continue };
-                let Ok(dbrev) = parts[3].parse::<u64>() else { continue };
+                let Ok(ts) = parts[2].parse::<i64>() else { return };
+                let Ok(dbrev) = parts[3].parse::<u64>() else { return };
                 // 兼容旧缓存文件（4 列，无 last_used 列）：用 ts 兜底。
                 let last_used = if parts.len() >= 5 {
                     parts[4].parse::<i64>().unwrap_or(ts)
@@ -161,7 +160,7 @@ impl ScanCache {
                         last_used,
                     },
                 );
-            }
+            });
         }
         // 加载即剔除：过期(TTL)与病毒库版本不符(dbrev)的条目在 `lookup` 里永远命中不了，
         // 直接丢出内存——纯内存操作、零磁盘写，立刻降低低端机常驻内存。
@@ -181,25 +180,25 @@ impl ScanCache {
 
         let mut path_index: HashMap<String, PathStamp> = HashMap::new();
         if let Ok(f) = File::open(path_index_file(path)) {
-            for line in BufReader::new(f).lines().flatten() {
+            super::for_each_line_skip_invalid_utf8(f, |line| {
                 if line.is_empty() {
-                    continue;
+                    return;
                 }
                 // path 放最后一列、用 splitn(5, ..) 切：前 4 列（hash/size/mtime_ns/
                 // last_used）都是不含 tab 的数字/哈希，剩下的全部（哪怕真的含 tab）
                 // 都归给 path，不会因为路径里偶然出现的字符切错列。
                 let parts: Vec<&str> = line.splitn(5, '\t').collect();
                 if parts.len() < 5 {
-                    continue;
+                    return;
                 }
-                let Ok(size) = parts[1].parse::<u64>() else { continue };
-                let Ok(mtime_ns) = parts[2].parse::<i128>() else { continue };
-                let Ok(last_used) = parts[3].parse::<i64>() else { continue };
+                let Ok(size) = parts[1].parse::<u64>() else { return };
+                let Ok(mtime_ns) = parts[2].parse::<i128>() else { return };
+                let Ok(last_used) = parts[3].parse::<i64>() else { return };
                 path_index.insert(
                     parts[4].to_string(),
                     PathStamp { size, mtime_ns, hash: parts[0].to_string(), last_used },
                 );
-            }
+            });
         }
         if path_index.len() > TARGET_PATH_ENTRIES {
             let mut items: Vec<(i64, String)> = path_index

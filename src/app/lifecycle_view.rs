@@ -11,10 +11,7 @@ use tray_icon::TrayIconEvent;
 
 /// 主窗口默认尺寸（与 `main.rs` 里 `with_inner_size` 一致）。
 pub(super) const MAIN_WINDOW_SIZE: [f32; 2] = [900.0, 600.0];
-#[cfg(not(windows))]
 pub(super) const ABOUT_WINDOW_SIZE: [f32; 2] = [480.0, 472.0];
-#[cfg(windows)]
-pub(super) const ABOUT_WINDOW_SIZE: [f32; 2] = [480.0, 428.0];
 
 #[cfg(target_os = "macos")]
 pub(super) const ACTIVATE_FRAMES: u8 = 12;
@@ -187,6 +184,9 @@ impl App {
                     let origin = ((monitor - egui::Vec2::from(size)) / 2.0).max(egui::Vec2::ZERO);
                     ctx.send_viewport_cmd(ViewportCommand::OuterPosition(origin.to_pos2()));
                 }
+                // winit 处理 Visible/InnerSize 后会刷新窗框；下一帧补 DWM 对齐，避免点击飘逸。
+                #[cfg(windows)]
+                crate::windows_chrome::schedule_chrome_tune(&mut self.chrome_tune_countdown);
             }
         } else if !self.window_hidden {
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));

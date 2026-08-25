@@ -22,6 +22,7 @@ mod theme;
 mod tray;
 mod wakeup;
 mod widgets;
+mod windows_chrome;
 
 use lifecycle::{parse_scan_path, parse_show, parse_start_tray_only, InitialMode};
 
@@ -249,47 +250,41 @@ fn wait_in_tray(tray: &tray::Tray) -> Option<InitialMode> {
     }
 }
 
-/// 按平台配置窗口装饰：Windows 用系统标题栏（避免无边框时客户区顶部"幽灵标题栏"
-/// 导致鼠标坐标与 egui 绘制差一个标题栏高度）；macOS 继续自绘标题栏。
+/// 按平台配置窗口装饰：全平台无边框 + egui 自绘标题栏（见 `app/chrome.rs` /
+/// `about_dialog.rs`）。Windows 不接受缩放，且需在 `windows_chrome` 里对齐客户区，
+/// 避免历史上 `decorations(false)` 的「幽灵标题栏」导致点击飘逸。
 fn build_viewport(window_icon: egui::IconData) -> egui::ViewportBuilder {
-    // 最小值要 ≤ 关于独占窗口尺寸（ABOUT_WINDOW_SIZE，见 app/mod.rs），否则 winit
+    // 最小值要 ≤ 关于独占窗口尺寸（ABOUT_WINDOW_SIZE，见 lifecycle_view.rs），否则 winit
     // 会把关于窗口夹到这个最小值、缩不小、背后仍留大片黑底。高度故意跟
-    // ABOUT_WINDOW_SIZE 的高度保持相等（不只是"≤"）：这样主窗口被手动缩到最小时，
-    // 也不会比关于页需要的高度更矮——两处高度改动要一起改。
-    //
-    // 按平台区分：ABOUT_WINDOW_SIZE 在 macOS/Linux 和 Windows 上高度不一样
-    // （Windows 用系统标题栏、不用像 macOS/Linux 那样在 InnerSize 里额外留自绘
-    // 标题栏的高度，见 app/mod.rs 里 `ABOUT_WINDOW_SIZE` 的注释），这里的最小高度
-    // 必须跟对应平台那份保持一致，不能两个平台共用同一个数字。
-    #[cfg(not(windows))]
+    // ABOUT_WINDOW_SIZE 的高度保持相等（不只是"≤"）：自绘标题栏占 44px，两处高度
+    // 改动要一起改。
     const MIN_INNER_SIZE: [f32; 2] = [440.0, 472.0];
-    #[cfg(windows)]
-    const MIN_INNER_SIZE: [f32; 2] = [440.0, 428.0];
 
     let mut builder = egui::ViewportBuilder::default()
         .with_title("CLV3000")
         .with_inner_size([900.0, 600.0])
         .with_min_inner_size(MIN_INNER_SIZE)
-        .with_resizable(true)
-        .with_icon(window_icon);
-
-    #[cfg(windows)]
-    {
-        builder = builder.with_decorations(true);
-    }
-
-    #[cfg(not(windows))]
-    {
+        .with_icon(window_icon)
         // 无边框窗口：没有原生标题栏，标题栏由 egui 自绘（见 app/chrome.rs 的
         // `title_bar` 和 about_dialog.rs 的 `paint_about_fullscreen`）。这里**不要**加
         // `with_fullsize_content_view(true)`——它只在"有原生标题栏、内容延伸到标题栏
         // 之下"时有意义；无边框窗口加了它反而会让 winit 在 macOS 上把窗口框体与内容
         // 区错开一个标题栏高度，egui 画不到的那条缝隙就显示成"底部一块黑色区域"。
-        builder = builder
-            .with_decorations(false)
-            .with_title_shown(false)
-            .with_titlebar_shown(false)
-            .with_titlebar_buttons_shown(false);
+        .with_decorations(false)
+        .with_title_shown(false)
+        .with_titlebar_shown(false)
+        .with_titlebar_buttons_shown(false);
+
+    #[cfg(windows)]
+    {
+        // Windows 上 winit 在 decorations(false) 时无法保留系统 resize 边框，用户也
+        // 接受固定尺寸，直接关掉缩放。
+        builder = builder.with_resizable(false);
+    }
+
+    #[cfg(not(windows))]
+    {
+        builder = builder.with_resizable(true);
     }
 
     builder

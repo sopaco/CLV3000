@@ -23,12 +23,14 @@ pub struct App {
     pub(super) toasts: Vec<Toast>,
     pub(super) allow_exit: bool,
     pub(super) app_icon_texture: Option<egui::TextureHandle>,
-    #[cfg(not(windows))]
     pub(super) titlebar_icon_texture: Option<egui::TextureHandle>,
     pub(super) dotted_bg_texture: Option<egui::TextureHandle>,
     pub(super) window_hidden: bool,
     pub(super) activate_countdown: u8,
     pub(super) size_intent: u8,
+    /// Windows：`reconcile_lifecycle` 发完视口命令后倒数，到 0 时在 `logic()` 里补 DWM 对齐。
+    #[cfg(windows)]
+    pub(super) chrome_tune_countdown: u8,
     #[cfg(target_os = "macos")]
     pub(super) macos_was_miniaturized: bool,
     #[cfg(target_os = "macos")]
@@ -93,12 +95,17 @@ impl App {
             toasts: Vec::new(),
             allow_exit: false,
             app_icon_texture: None,
-            #[cfg(not(windows))]
             titlebar_icon_texture: None,
             dotted_bg_texture: None,
             window_hidden,
             activate_countdown: 0,
             size_intent: 0,
+            #[cfg(windows)]
+            chrome_tune_countdown: if window_hidden {
+                0
+            } else {
+                crate::windows_chrome::CHROME_TUNE_DELAY_FRAMES
+            },
             #[cfg(target_os = "macos")]
             macos_was_miniaturized: false,
             #[cfg(target_os = "macos")]
@@ -129,7 +136,6 @@ impl App {
                 ),
             ));
         }
-        #[cfg(not(windows))]
         if self.titlebar_icon_texture.is_none() {
             self.titlebar_icon_texture = Some(load_texture(
                 ctx,
@@ -155,7 +161,6 @@ impl App {
             m.to_global.clear();
         });
         self.app_icon_texture.take();
-        #[cfg(not(windows))]
         self.titlebar_icon_texture.take();
         self.dotted_bg_texture.take();
         self.toasts.clear();
@@ -181,7 +186,12 @@ impl eframe::App for App {
         colors::BG_APP.to_normalized_gamma_f32()
     }
 
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        crate::windows_chrome::poll_chrome_tune(&mut self.chrome_tune_countdown, frame);
+        #[cfg(not(windows))]
+        let _ = frame;
+
         self.poll_tray();
         self.poll_show_requests();
         self.poll_scan_requests();
@@ -277,7 +287,6 @@ impl eframe::App for App {
         self.ensure_ui_resources(&ctx);
         self.toasts.retain(|t| !t.expired());
 
-        #[cfg(not(windows))]
         if let Some(tex) = self.titlebar_icon_texture.clone() {
             super::chrome::title_bar(ui, &ctx, &tex, self);
         }

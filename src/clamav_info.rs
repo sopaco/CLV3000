@@ -123,8 +123,7 @@ fn first_line(text: &str) -> String {
 
 /// 引擎不可用时，尽量从 `database\` 目录里的签名文件推断状态。
 fn summarize_database_files() -> String {
-    let dir = paths::resolved_clamav_database_dir()
-        .unwrap_or_else(|| paths::clamav_database_dir());
+    let dir = paths::resolved_clamav_database_dir().unwrap_or_else(paths::clamav_database_dir);
     if !dir.is_dir() {
         return format!("Not found ({})", dir.display());
     }

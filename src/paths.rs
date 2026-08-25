@@ -170,10 +170,10 @@ pub fn resolved_clamav_database_dir() -> Option<PathBuf> {
 fn has_signature_files(dir: &std::path::Path) -> bool {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
-            if let Some(ext) = e.path().extension().and_then(|e| e.to_str()) {
-                if matches!(ext, "cvd" | "cld" | "cud") {
-                    return true;
-                }
+            if let Some(ext) = e.path().extension().and_then(|e| e.to_str())
+                && matches!(ext, "cvd" | "cld" | "cud")
+            {
+                return true;
             }
         }
     }

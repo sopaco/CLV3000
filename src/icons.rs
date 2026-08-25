@@ -244,14 +244,12 @@ pub fn gear(painter: &Painter, rect: Rect, stroke: Stroke) {
     }
 }
 
-/// 标题栏"最小化"按钮图标：一条横线（仅 macOS 自绘标题栏使用）。
-#[cfg(not(windows))]
+/// 标题栏"最小化"按钮图标：一条横线。
 pub fn minimize(painter: &Painter, rect: Rect, stroke: Stroke) {
     painter.line_segment([map(rect, 0.2, 0.5), map(rect, 0.8, 0.5)], stroke);
 }
 
-/// 标题栏"关闭"按钮图标：一个 X（仅 macOS 自绘标题栏使用）。
-#[cfg(not(windows))]
+/// 标题栏"关闭"按钮图标：一个 X。
 pub fn close(painter: &Painter, rect: Rect, stroke: Stroke) {
     painter.line_segment([map(rect, 0.2, 0.2), map(rect, 0.8, 0.8)], stroke);
     painter.line_segment([map(rect, 0.8, 0.2), map(rect, 0.2, 0.8)], stroke);
