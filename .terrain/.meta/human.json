@@ -1,7 +1,9 @@
 {
   "project": "clv3000",
   "repo_path": ".",
-  "generated_at": "2026-08-09T03:22:17.901319+00:00",
-  "doc_count": 12,
-  "last_run_mode": "full"
+  "generated_at": "2026-08-25T13:19:29.513040+00:00",
+  "doc_count": 13,
+  "baseline_git_head": "e659727a9ce2e2321ba7e0c190a223a92eed33c1",
+  "last_run_mode": "full",
+  "language": "en"
 }
