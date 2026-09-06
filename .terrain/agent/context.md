@@ -123,7 +123,8 @@ User/CLI → lifecycle (main.rs) → App UI ←ScanEvent— Scan thread
 | Code signature skip | `src/scan/authenticode.rs` | Platform-specific trusted publisher check |
 | Quick scan enumeration | `src/scan/quick_scan.rs` | Running processes + loaded modules |
 | Full scan walk | `src/scan/full_scan.rs` | Drive walk, streaming path list |
-| Scan UI state machine | `src/app/core/scan_state.rs` | `ScanPhase`, `apply_scan_event` |
+| Scan UI state machine | `src/app/core/scan_state.rs` | `ScanPhase`, `apply_scan_event`, `threats_modal_open` flag |
+| Threat list modal | `src/app/pages/scan.rs` | `threats_modal`, `threats_entry_button`; centered modal replacing inline list |
 | App shell & navigation | `src/app/app_shell.rs` | `App`, page routing |
 | Scan / dashboard pages | `src/app/pages/` | User-facing scan controls and results |
 | Virus DB update UI | `src/app/freshclam.rs`, `src/app/core/virus_db.rs` | freshclam orchestration |
