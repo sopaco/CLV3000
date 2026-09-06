@@ -42,6 +42,8 @@ pub(crate) struct ScanPageState {
     pub(crate) engine_loading_remaining: usize,
     pub(crate) walk_files_found: usize,
     pub(crate) engine_scanning_path: Option<String>,
+    /// 威胁列表弹窗是否打开（弹窗渲染见 `pages/scan.rs::threats_modal`）。
+    pub(crate) threats_modal_open: bool,
     #[allow(dead_code)]
     pub(crate) pending_force_quarantine: Option<PendingForceQuarantine>,
     #[allow(dead_code)]
@@ -181,6 +183,7 @@ impl ScanPageState {
             engine_loading_remaining: 0,
             walk_files_found: 0,
             engine_scanning_path: None,
+            threats_modal_open: false,
             pending_force_quarantine: None,
             force_quarantine_rx: None,
             force_quarantine_path: None,
@@ -199,6 +202,7 @@ impl ScanPageState {
             return;
         }
         self.threats.clear();
+        self.threats_modal_open = false;
         self.last_error = None;
         self.started_at = Some(Instant::now());
         self.engine_loading = false;
@@ -236,6 +240,7 @@ impl ScanPageState {
             return;
         }
         self.threats.clear();
+        self.threats_modal_open = false;
         self.last_error = None;
         self.started_at = Some(Instant::now());
         self.engine_loading = false;

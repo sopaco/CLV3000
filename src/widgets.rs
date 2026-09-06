@@ -266,19 +266,14 @@ pub(crate) fn pill_button(ui: &mut Ui, label: &str, filled: bool) -> bool {
     let text_size = galley.size();
     let desired = Vec2::new(H_PAD * 2.0 + text_size.x, V_PAD * 2.0 + text_size.y);
 
+    // 精确分配 desired 尺寸，文字用同一个 galley 居中绘制。之前用
+    // `add_space + ui.label` 摆内容：label 按默认 Body 字号渲染，比量宽
+    // 用的 13px 宽，再加 item_spacing，实际内容比 desired 宽 ~13px 并向
+    // 右溢出分配区。在 right_to_left 布局里溢出会把父级 max_rect 一路撑
+    // 大——威胁列表里每张卡都比上一张宽一点，按钮也无法对齐。
     let bg_idx = ui.painter().add(egui::Shape::Noop);
-    let response = ui
-        .allocate_ui_with_layout(desired, egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            ui.add_space(H_PAD);
-            ui.label(egui::RichText::new(label).color(text_color));
-            ui.add_space(H_PAD);
-        })
-        .response;
-
-    let bg_rect = response.rect;
-    let interact = ui
-        .interact(bg_rect, response.id.with("pill"), Sense::click())
-        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let (bg_rect, response) = ui.allocate_exact_size(desired, Sense::click());
+    let interact = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     let (fill, stroke) = if filled {
         let fill = if interact.hovered() {
             Color32::from_rgb(224, 74, 74)
@@ -302,6 +297,10 @@ pub(crate) fn pill_button(ui: &mut Ui, label: &str, filled: bool) -> bool {
         egui::epaint::StrokeKind::Inside,
     );
     ui.painter().set(bg_idx, egui::Shape::Rect(shape));
+
+    let text_pos = bg_rect.center() - text_size / 2.0;
+    ui.painter()
+        .add(egui::epaint::TextShape::new(text_pos, galley, text_color));
 
     interact.clicked()
 }
