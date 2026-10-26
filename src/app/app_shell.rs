@@ -1,10 +1,10 @@
 //! `App` 结构体、资源管理与 `eframe::App` 实现。
 
+use super::Page;
 use super::core::AppCore;
-use super::lifecycle_view::ACTIVATE_RETRY_INTERVAL_MS;
 #[cfg(target_os = "macos")]
 use super::lifecycle_view::ACTIVATE_FRAMES;
-use super::Page;
+use super::lifecycle_view::ACTIVATE_RETRY_INTERVAL_MS;
 use crate::lifecycle::{InitialMode, Lifecycle, RunMode};
 use crate::sysmon::{self, ResourceSample, SysMonHandle};
 use crate::theme::{self, colors};
@@ -47,13 +47,12 @@ fn load_texture(
 }
 
 impl App {
-    pub fn new(
-        cc: &eframe::CreationContext<'_>,
-        tray: Option<Tray>,
-        initial: InitialMode,
-    ) -> Self {
-        theme::apply(&cc.egui_ctx);
-        crate::wakeup::register_ctx(&cc.egui_ctx);
+    /// `ctx` 而不是 `CreationContext`：UI 不依赖 eframe 即可构造，
+    /// egui_kittest 测试可以直接建 App 驱动 `run_logic`/`run_ui`（见 AGENTS.md
+    /// 「UI 代码验证流程」）。`main.rs` 传 `&cc.egui_ctx`。
+    pub fn new(ctx: &egui::Context, tray: Option<Tray>, initial: InitialMode) -> Self {
+        theme::apply(ctx);
+        crate::wakeup::register_ctx(ctx);
         #[cfg(target_os = "macos")]
         crate::macos_reopen::install_reopen_handler();
 
@@ -81,7 +80,7 @@ impl App {
 
         let window_hidden = matches!(initial, InitialMode::TrayOnly | InitialMode::About);
         if matches!(initial, InitialMode::TrayOnly) {
-            cc.egui_ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
             #[cfg(target_os = "macos")]
             crate::macos_reopen::enter_tray_mode();
         }
@@ -187,11 +186,24 @@ impl eframe::App for App {
     }
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Windows 的 DWM 帧调谐需要从 eframe::Frame 借 HWND，只能留在壳里；
+        // 其余帧逻辑在 `run_logic`，与 eframe 解耦、可被 egui_kittest 驱动。
         #[cfg(windows)]
         crate::windows_chrome::poll_chrome_tune(&mut self.chrome_tune, ctx, frame);
         #[cfg(not(windows))]
         let _ = frame;
 
+        self.run_logic(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.run_ui(ui);
+    }
+}
+
+impl App {
+    /// 帧逻辑（排空事件/生命周期对账），与 eframe 解耦，可在 egui_kittest 里驱动。
+    pub(crate) fn run_logic(&mut self, ctx: &egui::Context) {
         self.poll_tray();
         self.poll_show_requests();
         self.poll_scan_requests();
@@ -242,7 +254,9 @@ impl eframe::App for App {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    /// 帧绘制（纯绘制，不碰 eframe 类型），可在 egui_kittest 里驱动。
+    /// 测试驱动方式：`Harness::builder().build_ui(|ui| app.run_ui(ui))`。
+    pub(crate) fn run_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
 
         if ctx.input(|i| i.viewport().close_requested()) {

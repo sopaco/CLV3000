@@ -1,13 +1,13 @@
 //! 闪电扫描 / 全盘扫描页面与共用的 `scan_page` 渲染。
 
+use super::super::App;
 use super::super::core::{AppCore, ScanPageState, ScanPhase};
 use super::super::util::{format_duration, truncate};
-use super::super::App;
 use crate::config::AppConfig;
 use crate::icons;
 use crate::scan::ScanKind;
 use crate::theme::colors;
-use crate::widgets::{self, action_button, action_button_width, ThreatAction, Toast};
+use crate::widgets::{self, ThreatAction, Toast, action_button, action_button_width};
 use eframe::egui;
 use egui::{Color32, Stroke, Vec2};
 use std::time::Duration;
@@ -443,7 +443,11 @@ fn threats_entry_button(ui: &mut egui::Ui, count: usize) -> bool {
 
     let bg_rect = response.rect;
     let interact = ui
-        .interact(bg_rect, response.id.with("threats_entry"), egui::Sense::click())
+        .interact(
+            bg_rect,
+            response.id.with("threats_entry"),
+            egui::Sense::click(),
+        )
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     let fill = if interact.hovered() {
         Color32::from_rgb(56, 27, 30)
@@ -546,25 +550,34 @@ fn threats_modal(
                                 .small(),
                             );
                         });
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                let (resp, painter) =
-                                    ui.allocate_painter(Vec2::splat(30.0), egui::Sense::click());
-                                let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                                if resp.hovered() {
-                                    painter.rect_filled(resp.rect, 7.0, colors::RED_BORDER);
-                                }
-                                icons::close(
-                                    &painter,
-                                    resp.rect.shrink(9.0),
-                                    Stroke::new(1.5, colors::TEXT_SECONDARY),
-                                );
-                                if resp.clicked() {
-                                    close_requested = true;
-                                }
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let (resp, painter) =
+                                ui.allocate_painter(Vec2::splat(30.0), egui::Sense::click());
+                            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                            // 自绘按钮不会自动进 accesskit 树（egui 只为标准控件调
+                            // widget_info）——补上无障碍信息：屏幕阅读器能读出它，
+                            // egui_kittest 也能 get_by_label 查到它（见 AGENTS.md
+                            // 「UI 代码验证流程」）。取名 "Close window"（与 egui 内置
+                            // 窗口关闭按钮同名）以区别于底部 "Close"，避免查询歧义。
+                            resp.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    true,
+                                    "Close window",
+                                )
+                            });
+                            if resp.hovered() {
+                                painter.rect_filled(resp.rect, 7.0, colors::RED_BORDER);
+                            }
+                            icons::close(
+                                &painter,
+                                resp.rect.shrink(9.0),
+                                Stroke::new(1.5, colors::TEXT_SECONDARY),
+                            );
+                            if resp.clicked() {
+                                close_requested = true;
+                            }
+                        });
                     });
                 });
 
@@ -635,15 +648,12 @@ fn threats_modal(
             Err(e) => {
                 #[cfg(windows)]
                 {
-                    if state.pending_force_quarantine.is_none()
-                        && !state.is_force_quarantining()
-                    {
-                        state.pending_force_quarantine = Some(
-                            super::super::core::PendingForceQuarantine {
+                    if state.pending_force_quarantine.is_none() && !state.is_force_quarantining() {
+                        state.pending_force_quarantine =
+                            Some(super::super::core::PendingForceQuarantine {
                                 path: t.path.clone(),
                                 virus_name: t.virus_name.clone(),
-                            },
-                        );
+                            });
                     } else {
                         toasts.push(Toast::new(e));
                     }
@@ -659,248 +669,147 @@ fn threats_modal(
 
 #[cfg(test)]
 mod tests {
-    use crate::theme::colors;
-    use egui::{Align2, Margin, Sense, Stroke, Vec2};
+    //! egui_kittest 驱动**真实** `threats_modal` 的 UI 测试（见 AGENTS.md
+    //! 「UI 代码验证流程」）。迁移自旧的"复刻 UI 结构"式测试——那种测试在测试里
+    //! 手抄一遍弹窗布局，真实弹窗改了它照样绿，没有回归保护。
+
+    use super::threats_modal;
+    use crate::app::core::ScanPageState;
+    use crate::config::AppConfig;
+    use crate::scan::{ScanKind, Threat};
+    use crate::widgets::Toast;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+    use std::path::PathBuf;
+
+    /// 构造带两条假威胁、弹窗打开的扫描页状态。
+    fn threats_state() -> ScanPageState {
+        let mut state = ScanPageState::new(ScanKind::Quick);
+        state.threats = (0..2)
+            .map(|i| Threat {
+                path: PathBuf::from(format!("C:\\Users\\x\\Downloads\\EICAR\\E{i}.exe")),
+                virus_name: "Eicar-Test-Signature".to_string(),
+            })
+            .collect();
+        state.threats_modal_open = true;
+        state
+    }
+
+    /// 驱动真实 `threats_modal` 的 harness。状态由 harness 持有（元组），
+    /// 测试用 `harness.state()` 断言交互结果。
+    ///
+    /// 屏幕尺寸沿用旧测试的 1121×747：弹窗尺寸公式据此取到 clamp 上限 720。
+    /// `build_ui_state` 会立刻跑一帧（此时还是 egui 默认样式），所以 build 后先
+    /// `theme::apply` 再 `run()` 重绘到稳定；max_steps 默认 4 帧对"锚定居中 +
+    /// 主题切换"的稳定过程偏紧，放宽到 10。
+    fn modal_harness(
+        state: ScanPageState,
+    ) -> Harness<'static, (ScanPageState, AppConfig, Vec<Toast>)> {
+        let mut harness = Harness::builder()
+            .with_size(egui::Vec2::new(1121.0, 747.0))
+            .with_max_steps(10)
+            .build_ui_state(
+                |ui, (state, config, toasts)| threats_modal(ui.ctx(), state, config, toasts),
+                (state, AppConfig::default(), Vec::new()),
+            );
+        crate::theme::apply(&harness.ctx);
+        harness.run();
+        harness
+    }
 
     /// 回归测试：威胁弹窗的两个关闭入口（头部 × 图标按钮 + 底部 Close 按钮）
     /// hover 时必须切换为手型光标，与全应用其他按钮（`action_button`、
     /// `pill_button`、标题栏/侧边栏按钮）的交互惯例一致。
     ///
     /// egui 标准 `Button` 默认不改光标，自定义 `allocate_painter` 按钮的
-    /// `on_hover_cursor` 依赖 hit-test 注册（`interaction.rs` 的 hovered
-    /// 集合），两者都可能悄悄失效，这里用模拟 `PointerMoved` 事件直接断言
-    /// 帧输出的 `cursor_icon` 兜底。
+    /// `on_hover_cursor` 依赖 hit-test 注册，两者都可能悄悄失效——这里驱动真实
+    /// 弹窗、模拟 hover，直接断言帧输出里的 `cursor_icon`。
     #[test]
-    fn modal_close_buttons_show_pointing_hand_cursor() {
-        let ctx = egui::Context::default();
-        crate::theme::apply(&ctx);
+    fn threats_modal_close_buttons_show_pointing_hand_cursor() {
+        let mut harness = modal_harness(threats_state());
 
-        let size = Vec2::new(720.0, 537.0);
-        let mut close_x_rect = egui::Rect::NOTHING;
-        let mut close_btn_rect = egui::Rect::NOTHING;
+        harness.get_by_label("Close window").hover();
+        harness.run();
+        assert_eq!(
+            harness.output().platform_output.cursor_icon,
+            egui::CursorIcon::PointingHand,
+            "头部 × 按钮 hover 应显示手型光标"
+        );
 
-        // anchor 居中的 Window 首帧位置未稳定（frame 0 → 1 整窗漂移），鼠标
-        // 事件从布局稳定后的 frame 2 才开始发，rect 取上一稳定帧的值。
-        for frame in 0..4 {
-            let mut raw = egui::RawInput::default();
-            raw.screen_rect = Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(1121.0, 747.0),
-            ));
-            raw.time = Some(frame as f64 * 0.1);
-            if frame == 2 {
-                raw.events.push(egui::Event::PointerMoved(close_x_rect.center()));
-            } else if frame == 3 {
-                raw.events
-                    .push(egui::Event::PointerMoved(close_btn_rect.center()));
-            }
-
-            let output = ctx.run_ui(raw, |ui| {
-                let ctx = ui.ctx().clone();
-                egui::Window::new("Threats Found")
-                    .title_bar(false)
-                    .collapsible(false)
-                    .resizable(false)
-                    .fixed_size(size)
-                    .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-                    .frame(
-                        egui::Frame::default()
-                            .fill(colors::BG_CARD)
-                            .stroke(Stroke::new(1.0, colors::RED_BORDER))
-                            .corner_radius(16.0),
-                    )
-                    .show(&ctx, |ui| {
-                        // 头部（复刻）：× 按钮与真实 threats_modal 相同的实现。
-                        egui::Frame::default()
-                            .inner_margin(Margin::symmetric(20, 14))
-                            .show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
-                                ui.horizontal(|ui| {
-                                    let (_r, _p) =
-                                        ui.allocate_painter(Vec2::splat(36.0), Sense::hover());
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            let (resp, _p) =
-                                                ui.allocate_painter(Vec2::splat(30.0), Sense::click());
-                                            let resp =
-                                                resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-                                            close_x_rect = resp.rect;
-                                        },
-                                    );
-                                });
-                            });
-                        // 底部（复刻）：Close 按钮，与修复后的真实实现一致。
-                        ui.add_space(40.0);
-                        ui.vertical_centered(|ui| {
-                            let resp = ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new("Close").color(colors::TEXT_PRIMARY),
-                                    )
-                                    .fill(colors::ACCENT_BLUE_BG)
-                                    .stroke(Stroke::new(1.0, colors::BORDER))
-                                    .min_size(Vec2::new(120.0, 32.0)),
-                                )
-                                .on_hover_cursor(egui::CursorIcon::PointingHand);
-                            close_btn_rect = resp.rect;
-                        });
-                    });
-            });
-
-            if frame >= 2 {
-                assert_eq!(
-                    output.platform_output.cursor_icon,
-                    egui::CursorIcon::PointingHand,
-                    "frame {frame}: close button hover should show pointing-hand cursor"
-                );
-            }
-            output.drop_without_applying_deltas();
-        }
+        harness.get_by_label("Close").hover();
+        harness.run();
+        assert_eq!(
+            harness.output().platform_output.cursor_icon,
+            egui::CursorIcon::PointingHand,
+            "底部 Close 按钮 hover 应显示手型光标"
+        );
     }
 
-    /// 回归测试：威胁列表弹窗（`threats_modal` 的结构复刻 + 真实
-    /// `widgets::threat_card`）必须满足——
-    /// 1. 所有威胁卡片宽度一致（按钮因此右对齐到同一条竖线）；
-    /// 2. 弹窗保持 `fixed_size`，不被内容撑宽；
-    /// 3. 红色头部覆盖弹窗内容区完整宽度。
+    /// 回归测试：威胁卡片必须等宽对齐、弹窗保持 fixed_size 不被内容撑宽。
     ///
-    /// 历史缺陷：`pill_button` 用 13px 量宽却按 Body 字号渲染 label，实际
-    /// 内容比申请的 `desired` 宽 ~13px 并在 right_to_left 布局里向右溢出，
-    /// 级联后果是——每张卡比上一张宽 13px（按钮错位）、ScrollArea 内容
-    /// 变宽、窗口从 720 被撑到 746+、头部红色区域盖不满弹窗右缘。
+    /// 历史缺陷：`pill_button` 用 13px 量宽却按 Body 字号渲染 label，实际内容
+    /// 比申请的 `desired` 宽 ~13px 并在 right_to_left 布局里向右溢出，级联后果
+    /// 是每张卡比上一张宽（按钮错位）、ScrollArea 内容变宽、窗口从 720 被撑到
+    /// 746+。
     #[test]
-    fn modal_cards_equal_width_and_header_full_width() {
-        let ctx = egui::Context::default();
-        crate::theme::apply(&ctx);
-        // 首帧 anchor 位置未稳定，断言从第 2 帧开始；多跑几帧确认布局不再漂移。
-        for frame in 0..4 {
-            let mut raw = egui::RawInput::default();
-            raw.screen_rect = Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(1121.0, 747.0),
-            ));
-            raw.time = Some(frame as f64 * 0.1);
+    fn threats_modal_cards_equal_width_and_window_not_stretched() {
+        let harness = modal_harness(threats_state());
 
-            let mut card_widths: Vec<f32> = Vec::new();
-            let mut header_width = 0.0;
-            let mut window_width = 0.0;
-            // 与 threats_modal 相同的自适应尺寸公式（raw.screen_rect = 1121x747）。
-            let size = Vec2::new(
-                (1121.0_f32 * 0.72).clamp(420.0, 720.0),
-                (747.0_f32 * 0.72).clamp(320.0, 580.0),
-            );
+        // 弹窗（egui::Window 以标题 "Threats Found" 进 accesskit 树）不被撑宽：
+        // 1121×747 屏幕下 fixed_size 公式的 clamp 上限是 720。
+        let window = harness.get_by_label("Threats Found");
+        assert!(
+            window.rect().width() <= 720.5,
+            "modal window stretched to {} (fixed_size = 720)",
+            window.rect().width()
+        );
 
-            let output = ctx.run_ui(raw, |ui| {
-                let ctx = ui.ctx().clone();
-                let win = egui::Window::new("Threats Found")
-                    .title_bar(false)
-                    .collapsible(false)
-                    .resizable(false)
-                    .fixed_size(size)
-                    .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-                    .frame(
-                        egui::Frame::default()
-                            .fill(colors::BG_CARD)
-                            .stroke(Stroke::new(1.0, colors::RED_BORDER))
-                            .corner_radius(16.0),
-                    )
-                    .show(&ctx, |ui| {
-                        // ── 头部（复刻，含 set_min_width 全宽保障）
-                        let header = egui::Frame::default()
-                            .fill(colors::RED_BG)
-                            .corner_radius(egui::CornerRadius {
-                                nw: 15,
-                                ne: 15,
-                                sw: 0,
-                                se: 0,
-                            })
-                            .inner_margin(Margin::symmetric(20, 14))
-                            .show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
-                                ui.horizontal(|ui| {
-                                    let (_r, _p) =
-                                        ui.allocate_painter(Vec2::splat(36.0), Sense::hover());
-                                    ui.add_space(12.0);
-                                    ui.vertical(|ui| {
-                                        crate::widgets::bold_label(
-                                            ui,
-                                            "2 threats found",
-                                            17.0,
-                                            colors::TEXT_PRIMARY,
-                                        );
-                                        ui.label("subtitle");
-                                    });
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            let (_r, _p) =
-                                                ui.allocate_painter(Vec2::splat(30.0), Sense::click());
-                                        },
-                                    );
-                                });
-                            });
-                        header_width = header.response.rect.width();
+        // 每张卡里的 "High Risk" 徽标作为卡的定位锚点：左缘对齐 + 等宽。
+        // （pill_button 溢出时卡片逐张变宽，锚点的左缘对齐与等宽性被破坏。）
+        let badges: Vec<_> = harness.get_all_by_label("High Risk").collect();
+        assert_eq!(badges.len(), 2, "两张威胁卡各有且仅有一个 High Risk 徽标");
+        let (a, b) = (badges[0].rect(), badges[1].rect());
+        assert!(
+            (a.min.x - b.min.x).abs() < 0.5,
+            "threat cards misaligned: left edges {} vs {}",
+            a.min.x,
+            b.min.x
+        );
+        assert!(
+            (a.width() - b.width()).abs() < 0.5,
+            "threat cards differ in width: {} vs {}",
+            a.width(),
+            b.width()
+        );
+    }
 
-                        // ── 列表 + 底部按钮（复刻），卡片用真实 threat_card
-                        egui::Frame::default()
-                            .inner_margin(Margin::symmetric(20, 12))
-                            .show(ui, |ui| {
-                                const FOOTER_RESERVE: f32 = 12.0 + 40.0;
-                                egui::ScrollArea::vertical()
-                                    .auto_shrink([false, false])
-                                    .max_height(
-                                        (ui.available_height() - FOOTER_RESERVE).max(60.0),
-                                    )
-                                    .show(ui, |ui| {
-                                        for i in 0..2 {
-                                            let rect = ui
-                                                .vertical(|ui| {
-                                                    ui.set_width(ui.available_width());
-                                                    crate::widgets::threat_card(
-                                                        ui,
-                                                        "Eicar-Test-Signature",
-                                                        &format!(
-                                                            "C:\\Users\\x\\Downloads\\EICAR\\E{i}.exe"
-                                                        ),
-                                                    );
-                                                })
-                                                .response
-                                                .rect;
-                                            card_widths.push(rect.width());
-                                            ui.add_space(8.0);
-                                        }
-                                    });
-                                ui.add_space(12.0);
-                                ui.vertical_centered(|ui| {
-                                    let _ = ui.button("Close");
-                                });
-                            });
-                    });
-                if let Some(win) = win {
-                    window_width = win.response.rect.width();
-                }
-            });
-            output.drop_without_applying_deltas();
+    /// 交互测试：两个关闭入口点击后真的关掉弹窗；Escape 同样生效。
+    ///
+    /// 注意：不要在 harness 里点击 "Quarantine"/"Ignore"——`quarantine_file`
+    /// 动文件系统、`config.add_ignored` 会把测试机的真实 config.toml 落盘
+    /// （`AppConfig::save` 没有测试隔离）。涉及文件系统/落盘副作用的路径不
+    /// 在无头 UI 测试的覆盖范围。
+    #[test]
+    fn threats_modal_close_interactions() {
+        let mut harness = modal_harness(threats_state());
+        harness.get_by_label("Close").click();
+        harness.run();
+        assert!(
+            !harness.state().0.threats_modal_open,
+            "点击底部 Close 后弹窗应关闭"
+        );
 
-            if frame >= 1 {
-                let (a, b) = (card_widths[0], card_widths[1]);
-                assert!(
-                    (a - b).abs() < 0.5,
-                    "threat cards differ in width: {a} vs {b}"
-                );
-                assert!(
-                    (window_width - size.x).abs() < 0.5,
-                    "modal window grew to {window_width} (fixed_size = {})",
-                    size.x
-                );
-                // 头部应盖满内容区：窗口宽 - 左右各 1px 描边。
-                assert!(
-                    (header_width - (size.x - 2.0)).abs() < 0.5,
-                    "header width {header_width} doesn't cover full modal width"
-                );
-            }
-        }
+        let mut harness = modal_harness(threats_state());
+        harness.get_by_label("Close window").click();
+        harness.run();
+        assert!(
+            !harness.state().0.threats_modal_open,
+            "点击头部 × 按钮后弹窗应关闭"
+        );
+
+        let mut harness = modal_harness(threats_state());
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+        assert!(!harness.state().0.threats_modal_open, "Escape 应关闭弹窗");
     }
 }
-

@@ -18,34 +18,38 @@ version: 0.1.0
 |---|---|---|---|
 | 帧模型 | eframe 0.36 `logic()`+`ui()` 分离，Shell 薄壳委托 `LauncherUi` | 同一 API；`App::logic` 排事件/对账生命周期，`App::ui` 纯绘制 | ✅ |
 | 状态组织 | `LauncherUi` 集中状态 + `views.rs`/`dialogs.rs` 方法 | `App`（shell 关注点）+ `AppCore`（业务状态）+ `pages/` 自由函数 | ✅ 等价 |
-| UI↔后台 | `Backend` trait（`send`/`poll`）+ `Command`/`Event` 枚举，Native/Web/Fake 三实现 | 每页状态对象持 mpsc + `start`/`poll` 方法对 | ✅ 形状一致；缺测试替身 → §2 |
+| UI↔后台 | `Backend` trait（`send`/`poll`）+ `Command`/`Event` 枚举，Native/Web/Fake 三实现 | 每页状态对象持 mpsc + `start`/`poll` 方法对 | ✅ 形状一致；Fake 替身未引入（见 §2 末尾） |
 | 重绘调度 | Waker（`Arc<dyn Fn()>`）事件唤醒 + 任务期显式 repaint | 托盘/IPC 唤醒（wakeup）+ 扫描定时 33/250ms + sysmon/freshclam 完成点唤醒 | ✅ 同构；决策表见 §4 |
 | 弹窗 | `Dialog` 枚举 + `egui::Modal` + 每弹窗唯一 Id，渲染函数返回"是否关闭" | `threats_modal_open: bool`；`about_dialog` 模块级 `AtomicBool` + `take_closed()` | 🔶 §3 |
-| UI 测试 | `egui_kittest::Harness` 驱动**真实** UI + Fake backend + 快照回归 | 状态机纯函数单测（好）+ "复刻 UI"式 `ctx.run_ui` 测试（会漂移） | 🔶 §2（最大差距） |
+| UI 测试 | `egui_kittest::Harness` 驱动**真实** UI + Fake backend + 快照回归 | ✅ 已落地：kittest 驱动真实组件（`pages/scan.rs::tests`），见 AGENTS.md「UI 代码验证流程」 | ✅ §2 |
 | 分层 | Cargo workspace 强制：core 零 UI 依赖、可编译 wasm；"UI 不下沉"写进 AGENTS.md | 模块纪律：`src/scan` 等引擎模块零 egui import（已核实） | ✅ 等价；纪律见 §5 |
 | 主题 | `Tokens` 明暗双套 + 存 ctx data 运行时切换 | `colors` 常量 + `theme::apply` 一次，固定深色 | ⏸ §6 |
 | i18n | TSV catalog + `tl!`/`tn!` 宏 + 每语言复数规则 + 运行时查系统 CJK 字体 | 内联英文字符串 | ⏸ §6 |
 | 健壮性 | "Never crash"、no unsafe 写进 AGENTS.md | release `panic="abort"` 下仍有 `lock().unwrap()` 存量 | 🔶 §7 |
 
-## 2. 🔶 UI 测试：从"复刻 UI"到"驱动真实 UI"（优先级最高）
+## 2. ✅ UI 测试：egui_kittest 驱动真实 UI（已落地）
 
-**问题**：`pages/scan.rs` 现有两个 UI 测试（关闭按钮手型光标、威胁卡片等宽）在测试里**手抄了一份** `threats_modal` 的结构。真实弹窗改了，测试照样绿——测试与实现各自演化，等于没有回归保护。
+**已集成**（2026-10）：`egui_kittest = "0.36.1"`（dev-dependency，与 egui 同线），
+AGENTS.md「UI 代码验证流程」是权威操作指南。落地要点：
 
-**craft-launcher 的解法**（该生产代码已验证）：
+- `App::new` 收 `&egui::Context`（不再依赖 `CreationContext`），UI 不依赖 eframe 即可构造；
+- `App::run_logic(ctx)` / `App::run_ui(ui)` 从 `impl eframe::App` 壳里抽出（Windows 的
+  `poll_chrome_tune` 需 eframe::Frame 借 HWND，留在壳里）；
+- `pages/scan.rs::tests` 三个 kittest 测试驱动**真实** `threats_modal`：关闭按钮手型光标、
+  卡片等宽/弹窗不撑宽、关闭交互（点击/Escape）；旧"复刻 UI"式测试已删；
+- 自绘按钮（`pill_button`、弹窗 × 按钮）已补 `Response::widget_info`——进 accesskit 树
+  后 kittest 可查、屏幕阅读器可读，一石二鸟。
 
-- UI 不依赖 eframe 即可构造：`LauncherUi` 只需要 `egui::Context` + `Box<dyn Backend>` + Host，测试里随便建；
-- `egui_kittest::Harness` 无窗口跑真实 UI，`h.get_by_label("...").click()` 模拟交互后断言状态/命令；
-- Fake backend：`send()` 把命令录进 `Vec`（断言"点了按钮确实发了 `Command::Install`"），`poll()` 吐脚本化事件序列驱动状态机走完整流程；
-- 快照回归：设环境变量时把渲染结果落盘成图片，肉眼 diff；
-- GPU 驱动线程安全坑：UI 测试串行跑（`cargo test -- --test-threads=1`）。
+**写法速查**（详情看 AGENTS.md）：`Harness::builder().with_size(..).build_ui_state(闭包, 状态元组)`
+→ `theme::apply(&harness.ctx)` → `run()` → `get_by_label(...)` 查询 → `.click()/.hover()`
+→ `harness.state()` 断言状态 / `node.rect()` 断言几何 / `output().platform_output.cursor_icon` 断言光标。
 
-**CLV3000 落地路径**（增量式，不动现有模块划分）：
+**后续扩展方向**（非必须）：侧栏导航切换、设置 tab、toast 过期；如需命令录制/脚本化事件驱动的
+Fake backend（对标 craft-launcher 的 `Fake`），先给扫描引擎引入可替换的后台 trait 边界（§1 表中
+"UI↔后台"行仍是 🔶 的部分仅指这一点）。
 
-1. `App::new(cc: &CreationContext, ..)` → `App::new(ctx: &egui::Context, ..)`。已核实 `cc` 只用了 `cc.egui_ctx`（theme::apply / wakeup::register_ctx / 纹理都在 `ensure_ui_resources` 里用运行时 ctx）；`main.rs` 传 `&cc.egui_ctx` 即可。
-2. `impl eframe::App for App` 保留为薄壳：`ui()` 正文抽成 `App::run_ui(&mut self, ui: &mut egui::Ui)`（不出现 eframe 类型）；`logic()` 正文抽成 `run_logic(ctx)`。注意 Windows 的 `poll_chrome_tune` 需要 `eframe::Frame` 借 HWND——这一小段留在壳里（已核实 `logic` 里 frame 仅此一处使用）。
-3. `[dev-dependencies]` 加 `egui_kittest`（选与 egui 0.36 配套的版本；craft-launcher 即此搭配）。
-4. 先迁移 scan.rs 那两个复刻测试：构造 `App` → 往 `core.quick.threats` 塞数据 + 打开弹窗 → kittest 驱动**真实** `threats_modal` 断言光标/等宽。再逐步覆盖：侧栏导航切换、设置 tab 切换、toast 过期。
-5. UI 测试里**不要**碰真 clamscan/freshclam/注册表——扫描状态机已有 `apply_scan_event` 纯函数单测（`scan_state.rs::tests`）覆盖；kittest 层只测布局与交互。
+**禁止事项**（AGENTS.md 有完整版）：复刻 UI 结构式测试；在 harness 里触发文件系统/落盘副作用
+（`quarantine_file`、`AppConfig::save` 无测试隔离）；起真 clamscan/freshclam。
 
 ## 3. 🔶 弹窗：`Dialog` 枚举 + `egui::Modal`
 

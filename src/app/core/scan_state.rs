@@ -169,7 +169,9 @@ pub(crate) fn apply_scan_event(
 }
 
 impl ScanPageState {
-    pub(super) fn new(kind: ScanKind) -> Self {
+    /// `pub(crate)`：除 `core::AppCore` 外，`pages/scan.rs` 的 egui_kittest 测试
+    /// 也用它构造弹窗测试状态（见 AGENTS.md「UI 代码验证流程」）。
+    pub(crate) fn new(kind: ScanKind) -> Self {
         Self {
             kind,
             phase: ScanPhase::Idle,
@@ -305,7 +307,9 @@ impl ScanPageState {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.force_quarantine_rx = None;
                 self.force_quarantine_path = None;
-                Some(Err("Force quarantine thread stopped unexpectedly".to_string()))
+                Some(Err(
+                    "Force quarantine thread stopped unexpectedly".to_string()
+                ))
             }
         }
     }
@@ -397,9 +401,7 @@ mod tests {
             processes_total: 10,
             files_found: 42,
         });
-        state.apply(ScanEvent::ScanStarted {
-            total: Some(42),
-        });
+        state.apply(ScanEvent::ScanStarted { total: Some(42) });
         match state.phase {
             ScanPhase::Scanning {
                 total,
@@ -430,9 +432,7 @@ mod tests {
         assert_eq!(state.threats.len(), 1);
         assert_eq!(state.threats[0].virus_name, "EICAR");
         match state.phase {
-            ScanPhase::Scanning {
-                scanned, total, ..
-            } => {
+            ScanPhase::Scanning { scanned, total, .. } => {
                 assert_eq!(scanned, 1);
                 assert_eq!(total, Some(1));
             }
@@ -476,9 +476,7 @@ mod tests {
         assert!(state.started_at.is_none());
         match state.phase {
             ScanPhase::Done {
-                scanned,
-                cancelled,
-                ..
+                scanned, cancelled, ..
             } => {
                 assert_eq!(scanned, 5);
                 assert!(!cancelled);

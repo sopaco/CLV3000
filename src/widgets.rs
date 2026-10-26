@@ -96,8 +96,7 @@ pub fn progress_ring(
     // Middle 描边会向内外各扩 half width；allocate_painter 的 clip 正好卡在
     // diameter 边界上，所以半径要按线宽留边，否则轨道左右会被裁掉。
     let radius = diameter / 2.0 - ring_width / 2.0 - 1.0;
-    let (response, painter) =
-        ui.allocate_painter(Vec2::splat(diameter), Sense::hover());
+    let (response, painter) = ui.allocate_painter(Vec2::splat(diameter), Sense::hover());
     let rect = response.rect;
     let center = rect.center();
 
@@ -119,7 +118,15 @@ pub fn progress_ring(
     match percent {
         Some(p) => {
             let sweep = p.clamp(0.0, 1.0) * std::f32::consts::TAU;
-            draw_arc(&painter, center, radius, ring_width, start_angle, sweep, ring_color);
+            draw_arc(
+                &painter,
+                center,
+                radius,
+                ring_width,
+                start_angle,
+                sweep,
+                ring_color,
+            );
         }
         None => {
             let t = ui.input(|i| i.time) as f32;
@@ -182,7 +189,10 @@ fn draw_arc(
             center + Vec2::new(a.cos(), a.sin()) * radius
         })
         .collect();
-    painter.add(egui::Shape::line(points, PathStroke::from(Stroke::new(width, color))));
+    painter.add(egui::Shape::line(
+        points,
+        PathStroke::from(Stroke::new(width, color)),
+    ));
 }
 
 /// 一个小圆角胶囊：数值 + 说明文字，比如 "128 / 342  进程"。
@@ -195,7 +205,11 @@ pub fn stat_pill(ui: &mut Ui, value: &str, label: &str) {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 bold_label(ui, value, 14.0, colors::TEXT_PRIMARY);
-                ui.label(egui::RichText::new(label).color(colors::TEXT_SECONDARY).small());
+                ui.label(
+                    egui::RichText::new(label)
+                        .color(colors::TEXT_SECONDARY)
+                        .small(),
+                );
             });
         });
 }
@@ -204,11 +218,12 @@ pub fn stat_pill(ui: &mut Ui, value: &str, label: &str) {
 /// 多宽"，而不是猜一个固定值——扫描过程中数字会变（比如 "5 / 342" 变成
 /// "128 / 342"），猜的固定宽度会跟着跑偏，量出来的不会。
 pub fn measure_text_width(ui: &Ui, text: &str, size: f32) -> f32 {
-    ui.ctx().fonts_mut(|f| {
-        f.layout_no_wrap(text.to_owned(), FontId::proportional(size), Color32::WHITE)
-    })
-    .size()
-    .x
+    ui.ctx()
+        .fonts_mut(|f| {
+            f.layout_no_wrap(text.to_owned(), FontId::proportional(size), Color32::WHITE)
+        })
+        .size()
+        .x
 }
 
 /// `stat_pill` 实际渲染宽度的估算：内边距(16*2) + 边框(1*2) + value/label 间距(10，
@@ -233,14 +248,18 @@ pub fn centered_stat_pills(ui: &mut Ui, pills: &[(String, &str)]) {
         total_width += stat_pill_width(ui, value, label);
     }
     let desired = Vec2::new(total_width, 40.0);
-    ui.allocate_ui_with_layout(desired, egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        for (i, (value, label)) in pills.iter().enumerate() {
-            if i > 0 {
-                ui.add_space(GAP);
+    ui.allocate_ui_with_layout(
+        desired,
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            for (i, (value, label)) in pills.iter().enumerate() {
+                if i > 0 {
+                    ui.add_space(GAP);
+                }
+                stat_pill(ui, value, label);
             }
-            stat_pill(ui, value, label);
-        }
-    });
+        },
+    );
 }
 
 pub enum ThreatAction {
@@ -258,7 +277,11 @@ pub(crate) fn pill_button(ui: &mut Ui, label: &str, filled: bool) -> bool {
     const H_PAD: f32 = 14.0;
     const V_PAD: f32 = 7.0;
 
-    let text_color = if filled { Color32::WHITE } else { colors::TEXT_SECONDARY };
+    let text_color = if filled {
+        Color32::WHITE
+    } else {
+        colors::TEXT_SECONDARY
+    };
     let font_id = FontId::proportional(13.0);
     let galley = ui
         .ctx()
@@ -274,6 +297,12 @@ pub(crate) fn pill_button(ui: &mut Ui, label: &str, filled: bool) -> bool {
     let bg_idx = ui.painter().add(egui::Shape::Noop);
     let (bg_rect, response) = ui.allocate_exact_size(desired, Sense::click());
     let interact = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    // 自绘按钮不会自动进 accesskit 树（egui 只为标准控件调 widget_info）——补上
+    // 无障碍信息：屏幕阅读器能读出按钮名，egui_kittest 也能 get_by_label 查到
+    // （威胁弹窗/设置页的 UI 测试都靠这个，见 AGENTS.md「UI 代码验证流程」）。
+    interact.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label.to_owned())
+    });
     let (fill, stroke) = if filled {
         let fill = if interact.hovered() {
             Color32::from_rgb(224, 74, 74)
@@ -337,7 +366,11 @@ pub fn threat_card(ui: &mut Ui, virus_name: &str, path: &str) -> ThreatAction {
                             .corner_radius(999.0)
                             .inner_margin(egui::Margin::symmetric(8, 2))
                             .show(ui, |ui| {
-                                ui.label(egui::RichText::new("High Risk").color(Color32::WHITE).small());
+                                ui.label(
+                                    egui::RichText::new("High Risk")
+                                        .color(Color32::WHITE)
+                                        .small(),
+                                );
                             });
                     });
                     ui.label(

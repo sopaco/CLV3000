@@ -24,7 +24,7 @@ mod wakeup;
 mod widgets;
 mod windows_chrome;
 
-use lifecycle::{parse_scan_path, parse_show, parse_start_tray_only, InitialMode};
+use lifecycle::{InitialMode, parse_scan_path, parse_show, parse_start_tray_only};
 
 fn main() {
     // ── 强制隔离提权子进程模式（仅 Windows）──────────────────────────
@@ -121,7 +121,7 @@ fn main() {
     let _ = eframe::run_native(
         "CLV3000",
         native_options,
-        Box::new(move |cc| Ok(Box::new(app::App::new(cc, tray, initial)))),
+        Box::new(move |cc| Ok(Box::new(app::App::new(&cc.egui_ctx, tray, initial)))),
     );
 }
 
@@ -171,12 +171,12 @@ fn resolve_initial_mode(
 /// 托盘点不出菜单、事件不进 channel。
 #[cfg(windows)]
 fn wait_in_tray(tray: &tray::Tray) -> Option<InitialMode> {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, MSG, MsgWaitForMultipleObjectsEx, MWMO_INPUTAVAILABLE,
-        MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS, PeekMessageW, PM_REMOVE, QS_ALLINPUT,
-        TranslateMessage, WM_QUIT,
-    };
     use tray_icon::TrayIconEvent;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, MSG, MSG_WAIT_FOR_MULTIPLE_OBJECTS_EX_FLAGS, MWMO_INPUTAVAILABLE,
+        MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_ALLINPUT, TranslateMessage,
+        WM_QUIT,
+    };
 
     let mut msg = MSG::default();
     loop {
