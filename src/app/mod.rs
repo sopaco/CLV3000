@@ -9,6 +9,9 @@ mod pages;
 mod settings;
 mod util;
 
+#[cfg(test)]
+mod ui_preview;
+
 pub use app_shell::App;
 
 #[derive(Clone, Copy, PartialEq, Eq)]

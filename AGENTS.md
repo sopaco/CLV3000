@@ -177,4 +177,10 @@ resp.widget_info(|| {
 需要视觉回归时用 snapshot（CPU 光栅化，不需要 GPU）：`harness.snapshot("名字")` 落盘对比。
 若遇 GPU 驱动线程安全问题（仅 wgpu 渲染路径），串行跑：`cargo test -- --test-threads=1`。
 
+整窗视觉评估用 `src/app/ui_preview.rs`（`#[ignore]` 测试，不影响常规 `cargo test`）：
+`cargo test ui_preview -- --ignored --nocapture` 驱动真实 `App` 渲染 13 个状态到 `target/ui_preview/*.png`，
+stdout 同时打印 ASCII 构图、像素探针（居中偏移、点阵可见度）与 WCAG 对比度表，探针数字可做回归参考。
+它内置纯 CPU 软件光栅化器（egui_kittest 0.36 的 snapshot feature 不含渲染器，这里补缺，零新增依赖）。
+PNG 需要用户肉眼终审。
+
 背景与设计决策见 skill：`.claude/skills/clv3000-egui-patterns`（对标 craft-launcher 的架构对比结论）；视觉规范见 `clv3000-design`。

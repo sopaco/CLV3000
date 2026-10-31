@@ -306,7 +306,7 @@ impl App {
         }
 
         egui::Panel::bottom("resource_bar")
-            .exact_size(50.0)
+            .exact_size(crate::widgets::RESOURCE_BAR_HEIGHT)
             .resizable(false)
             .show_separator_line(false)
             .frame(
@@ -316,11 +316,23 @@ impl App {
             )
             .show(ui, |ui| super::chrome::resource_bar(ui, self.last_sample));
 
+        // 侧栏形态按窗口宽度自适应（宽窗口带文字，窄窗口纯图标保内容区）。
+        let window_w = ctx.input(|i| i.viewport_rect()).width();
+        let sidebar_w = super::chrome::sidebar_width(window_w);
         egui::Panel::left("sidebar")
-            .exact_size(64.0)
+            .exact_size(sidebar_w)
             .resizable(false)
             .show_separator_line(false)
-            .frame(egui::Frame::default().fill(colors::BG_SIDEBAR))
+            .frame(
+                egui::Frame::default()
+                    .fill(colors::BG_SIDEBAR)
+                    // 侧栏内容左右各留 8px：导航行/版本号不贴着窗口边缘，
+                    // active 行的左缘指示条才不会像被窗框裁掉一半。
+                    .inner_margin(egui::Margin::symmetric(
+                        super::chrome::SIDEBAR_INSET,
+                        0,
+                    )),
+            )
             .show(ui, |ui| super::chrome::sidebar(ui, &ctx, self));
 
         let dotted_bg_texture = self.dotted_bg_texture.clone();

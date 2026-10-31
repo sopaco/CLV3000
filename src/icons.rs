@@ -121,7 +121,19 @@ pub fn warning_triangle(painter: &Painter, rect: Rect, stroke: Stroke, fill: Opt
 
 /// 闪电图标。
 pub fn bolt(painter: &Painter, rect: Rect, fill: Color32) {
-    let pts: Vec<Pos2> = [
+    let pts = bolt_points(rect);
+    painter.add(Shape::convex_polygon(pts, fill, Stroke::NONE));
+}
+
+/// 闪电的**描边**版本：跟 [`bolt`] 同一组顶点，只是不填充、改为 1.6px 描边。
+/// 扫描页空闲态用这一版——大尺寸下填充的闪电是一坨实心蓝，描边版更透气。
+pub fn bolt_outlined(painter: &Painter, rect: Rect, stroke: Stroke) {
+    let pts = bolt_points(rect);
+    painter.add(polyline(&pts, stroke, true));
+}
+
+fn bolt_points(rect: Rect) -> Vec<Pos2> {
+    [
         (0.58, 0.02),
         (0.18, 0.56),
         (0.44, 0.56),
@@ -131,8 +143,49 @@ pub fn bolt(painter: &Painter, rect: Rect, fill: Color32) {
     ]
     .iter()
     .map(|&(u, v)| map(rect, u, v))
-    .collect();
-    painter.add(Shape::convex_polygon(pts, fill, Stroke::NONE));
+    .collect()
+}
+
+/// "运行中的程序"图标：一个应用窗口（外框 + 标题栏 + 标题栏上的两个小点）。
+/// 扫描覆盖清单第一行用——闪电扫的就是"此刻正在跑的程序"。
+pub fn process_window(painter: &Painter, rect: Rect, stroke: Stroke) {
+    let frame: Vec<Pos2> = [(0.12, 0.18), (0.88, 0.18), (0.88, 0.82), (0.12, 0.82)]
+        .iter()
+        .map(|&(u, v)| map(rect, u, v))
+        .collect();
+    painter.add(polyline(&frame, stroke, true));
+    // 标题栏分隔线。
+    painter.line_segment([map(rect, 0.12, 0.38), map(rect, 0.88, 0.38)], stroke);
+    // 标题栏左侧两个小点（左右对称，保持视觉重心居中）。
+    for u in [0.22, 0.32] {
+        painter.circle_filled(map(rect, u, 0.28), stroke.width * 0.85, stroke.color);
+    }
+}
+
+/// "已加载的库/驱动"图标：芯片——中央方形 + 两侧各三根引脚（左右对称）。
+pub fn library_chip(painter: &Painter, rect: Rect, stroke: Stroke) {
+    let body: Vec<Pos2> = [(0.26, 0.28), (0.74, 0.28), (0.74, 0.72), (0.26, 0.72)]
+        .iter()
+        .map(|&(u, v)| map(rect, u, v))
+        .collect();
+    painter.add(polyline(&body, stroke, true));
+    // 两侧引脚：v = 0.38 / 0.50 / 0.62 三个高度，左右对称。
+    for v in [0.38, 0.50, 0.62] {
+        painter.line_segment([map(rect, 0.10, v), map(rect, 0.26, v)], stroke);
+        painter.line_segment([map(rect, 0.74, v), map(rect, 0.90, v)], stroke);
+    }
+}
+
+/// "硬盘/磁盘"图标：圆角外框 + 中间的盘片横线 + 中心小圆。全盘扫描覆盖
+/// 清单用——表达"磁盘上的文件"。
+pub fn disk(painter: &Painter, rect: Rect, stroke: Stroke) {
+    let frame: Vec<Pos2> = [(0.14, 0.24), (0.86, 0.24), (0.86, 0.76), (0.14, 0.76)]
+        .iter()
+        .map(|&(u, v)| map(rect, u, v))
+        .collect();
+    painter.add(polyline(&frame, stroke, true));
+    painter.line_segment([map(rect, 0.30, 0.50), map(rect, 0.70, 0.50)], stroke);
+    painter.circle_filled(map(rect, 0.50, 0.50), stroke.width * 0.9, stroke.color);
 }
 
 fn ellipse_points(center: Pos2, rx: f32, ry: f32, segments: usize) -> Vec<Pos2> {

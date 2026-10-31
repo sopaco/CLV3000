@@ -14,7 +14,7 @@ use crate::clamav_info::ClamAvInfo;
 use crate::icon_data;
 use crate::theme::colors;
 use crate::widgets;
-use egui::{pos2, Align2, CursorIcon, Frame, Key, Rect, Sense, Stroke, TextureHandle, Vec2};
+use egui::{Align2, CursorIcon, Frame, Key, Rect, Sense, Stroke, TextureHandle, Vec2, pos2};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const LOGO_TEX_ID: &str = "clv3000_about_logo";
@@ -97,7 +97,7 @@ fn paint_about_body(ui: &mut egui::Ui, logo: &TextureHandle, info: &ClamAvInfo) 
         ui.add(
             egui::Image::new((logo.id(), logo.size_vec2()))
                 .fit_to_exact_size(Vec2::splat(LOGO_DISPLAY_PT))
-                .corner_radius(14.0),
+                .corner_radius(crate::theme::radius::LG),
         );
         ui.add_space(10.0);
         widgets::bold_label(ui, "CLV3000", 20.0, colors::TEXT_PRIMARY);
@@ -217,7 +217,7 @@ pub fn paint_about_fullscreen(ui: &mut egui::Ui) {
                 |ui| {
                     Frame::default()
                         .fill(colors::BG_CARD)
-                        .corner_radius(16.0)
+                        .corner_radius(crate::theme::radius::LG)
                         .inner_margin(egui::Margin::same(28))
                         .stroke(egui::Stroke::new(1.0, colors::BORDER))
                         .show(ui, |ui| {
@@ -247,7 +247,8 @@ fn about_title_close_button(ui: &mut egui::Ui, rect: Rect) -> bool {
         .interact(rect, ui.id().with("about_close"), Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand);
     if response.hovered() {
-        ui.painter().rect_filled(rect, 6.0, colors::ACCENT_BLUE_BG);
+        ui.painter()
+            .rect_filled(rect, crate::theme::radius::SM, colors::ACCENT_BLUE_BG);
     }
     crate::icons::close(
         ui.painter(),
