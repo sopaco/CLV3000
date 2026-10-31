@@ -108,3 +108,79 @@ Windows 上工具部署在 `%USERPROFILE%\.terrain\bin\`（Git Bash / PowerShell
 
 **注意**：不要运行 `codegraph install` 或 `rtk init`（已由 Terrain + Skills 配置）。
 <!-- terrain:end tools -->
+
+<!-- 手工维护章节（不在 terrain 标记区内，scan 不会覆盖） -->
+
+## UI 代码验证流程（egui_kittest，必读）
+
+改 UI 代码（`src/app/**`、`src/widgets.rs`、`src/theme.rs`、`src/icons.rs`、`src/about_dialog.rs`）时，按下面的闭环验证，**不要**只跑 `cargo check` 就交差。
+
+### 1. 编译 + 状态机单测
+
+```bash
+cargo check --all-targets   # 编译含测试目标
+cargo test                  # 含 scan_state 等状态机纯函数单测（毫秒级）
+```
+
+### 2. UI 行为/布局变更 → egui_kittest 驱动真实组件
+
+项目已集成 `egui_kittest`（dev-dependency，版本与 egui 严格同线 0.36.x）。
+UI 测试**无头**运行：无窗口、无 GPU、整套 < 1s。参考样例：`src/app/pages/scan.rs::tests`（威胁弹窗系列）。
+
+测试写在**组件同文件**的 `mod tests`（可访问私有项，不要放 `tests/` 集成目录）。标准模式：
+
+```rust
+use egui_kittest::kittest::Queryable;
+use egui_kittest::Harness;
+
+// 1. 构造真实状态（ScanPageState / AppConfig::default() 等）
+// 2. harness 持有状态，闭包里调真实渲染函数：
+let mut harness = Harness::builder()
+    .with_size(egui::Vec2::new(1121.0, 747.0))  // 弹窗尺寸公式依赖屏幕尺寸
+    .with_max_steps(10)                          // 默认 4 帧对锚定/主题稳定偏紧
+    .build_ui_state(
+        |ui, (state, config, toasts)| threats_modal(ui.ctx(), state, config, toasts),
+        (state, AppConfig::default(), Vec::new()),
+    );
+crate::theme::apply(&harness.ctx);  // build 后补主题，再 run 到稳定
+harness.run();
+
+// 3. 查询 + 交互 + 断言
+harness.get_by_label("Close").click();
+harness.run();
+assert!(!harness.state().0.threats_modal_open);
+```
+
+断言优先级：**状态变化 > `node.rect()` 几何 > `harness.output().platform_output.cursor_icon` > 视觉快照**。
+常用 API：`get_by_label` / `get_all_by_label`（多匹配）/ `get_by_role`、`node.rect()` / `.hover()` / `.click()`、`harness.key_press(egui::Key::Escape)`。查询树是 **accesskit** 树，匹配标准控件（`ui.label`、`egui::Button`、`egui::Window` 以标题为 label）。
+
+### 3. 自绘可交互组件必须补 `widget_info`
+
+`ui.allocate_painter` / `ui.interact` 手搓的按钮**不会**自动进 accesskit 树（egui 只为标准控件调 `widget_info`），kittest 查不到、屏幕阅读器也读不出。新增自绘按钮时必须补（参考 `widgets.rs::pill_button`、`pages/scan.rs` 威胁弹窗 × 按钮）：
+
+```rust
+resp.widget_info(|| {
+    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "按钮名")
+});
+```
+
+命名避免与现有控件撞名（查询遇多匹配会 panic）；egui 窗口关闭按钮的惯例名是 `"Close window"`。
+
+### 4. 禁止事项
+
+- **禁止**"复刻 UI 结构"式测试（在测试里手抄一遍布局再断言手抄品）——真实组件改了测试照样绿，等于没有回归保护。一律驱动真实渲染函数。
+- **禁止**在 harness 里触发文件系统/落盘副作用：不要点会走 `quarantine_file`（动文件系统）或 `config.add_ignored` 等会 `AppConfig::save`（把测试机真实 config.toml 落盘，**无测试隔离**）的路径；不要起真 clamscan/freshclam/注册表操作。涉及这些副作用的逻辑用状态机纯函数单测覆盖（如 `apply_scan_event`）。
+- 全帧 `App` 级测试：`App::new` 已收 `&egui::Context`（不依赖 eframe），`run_logic`/`run_ui` 可直接被 harness 驱动；但注意 `run_ui` 会拉起 sysmon 线程/纹理，能用组件级测试就优先组件级。
+
+### 5. 渲染/快照测试
+
+需要视觉回归时用 snapshot（CPU 光栅化，不需要 GPU）：`harness.snapshot("名字")` 落盘对比。
+若遇 GPU 驱动线程安全问题（仅 wgpu 渲染路径），串行跑：`cargo test -- --test-threads=1`。
+
+整窗视觉评估用 `src/app/ui_preview.rs`（`#[ignore]` 测试，不影响常规 `cargo test`）：
+`cargo test ui_preview -- --ignored --nocapture` 驱动真实 `App` 渲染 13 个状态到 `target/ui_preview/*.png`，
+stdout 同时打印 ASCII 构图、像素探针（居中偏移、点阵可见度）与 WCAG 对比度表，探针数字可做回归参考。
+它内置纯 CPU 软件光栅化器（egui_kittest 0.36 的 snapshot feature 不含渲染器，这里补缺，零新增依赖）。
+PNG 需要用户肉眼终审。
+
+背景与设计决策见 skill：`.claude/skills/clv3000-egui-patterns`（对标 craft-launcher 的架构对比结论）；视觉规范见 `clv3000-design`。

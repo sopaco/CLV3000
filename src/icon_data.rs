@@ -34,6 +34,22 @@ pub fn load_app_icon_for_display(
     decode_and_resize(APP_ICON_PNG, target, FilterType::Lanczos3)
 }
 
+/// 取品牌图标的 egui 纹理（按显示尺寸），缓存在 egui 的临时数据区。
+///
+/// 用在需要"正式品牌图标"的界面（病毒库页卡片的主视觉），跟"关于"页同一张图。
+/// 缓存是必须的：`load_app_icon_for_display` 每次调用都要解一遍 PNG。
+pub fn app_icon_texture(ctx: &egui::Context, display_pt: f32) -> egui::TextureHandle {
+    let key = egui::Id::new(("clv3000_app_icon", display_pt as u32));
+    if let Some(handle) = ctx.data_mut(|d| d.get_temp::<egui::TextureHandle>(key)) {
+        return handle;
+    }
+    let (rgba, w, h) = load_app_icon_for_display(display_pt, ctx.pixels_per_point());
+    let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+    let handle = ctx.load_texture("clv3000_app_icon", image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(key, handle.clone()));
+    handle
+}
+
 /// 解码内嵌的简化版图标（适合小尺寸），返回 `(rgba, width, height)`。
 /// 窗口图标建议大一点（比如 128），托盘图标按系统惯例给小图（比如 32）。
 pub fn load_tray_icon(size: u32) -> (Vec<u8>, u32, u32) {

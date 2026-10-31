@@ -24,10 +24,13 @@ pub(crate) struct VirusDbState {
     pub(crate) updating: bool,
     rx: Option<Receiver<Result<UpdateOutcome, String>>>,
     version_rx: Option<Receiver<String>>,
-    pub(crate) status_col_height: f32,
-    pub(crate) about_col_height: f32,
+    /// 页面内容高度缓存（垂直居中用，见 `widgets::vertically_centered`）。
+    pub(crate) content_height: f32,
     pub(crate) db_version: Option<String>,
     engine_probe: Option<EngineProbe>,
+    /// 本次运行是否已经发起过一次自动检查。自动检查只在启动后做一次
+    /// （结果与「上次检查」时间一起展示），不做高频轮询。
+    auto_check_done: bool,
 }
 
 impl VirusDbState {
@@ -36,10 +39,10 @@ impl VirusDbState {
             updating: false,
             rx: None,
             version_rx: None,
-            status_col_height: 0.0,
-            about_col_height: 0.0,
+            content_height: 0.0,
             db_version: None,
             engine_probe: None,
+            auto_check_done: false,
         }
     }
 
@@ -98,6 +101,20 @@ impl VirusDbState {
             let _ = tx.send(result);
             ctx.request_repaint();
         });
+    }
+
+    /// 自动检查：本次运行只发起一次（`auto_check_done` 置位后不再重复）。
+    /// 放在 `poll_background` 每帧调用里，返回 true 表示这一帧发起了检查。
+    pub(crate) fn maybe_auto_update(&mut self, ctx: egui::Context) -> bool {
+        if self.auto_check_done || self.updating {
+            return false;
+        }
+        self.auto_check_done = true;
+        if !paths::freshclam_available() {
+            return false;
+        }
+        self.start_update(ctx);
+        true
     }
 
     pub(super) fn poll(&mut self) -> Option<Result<UpdateOutcome, String>> {

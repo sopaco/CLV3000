@@ -42,6 +42,8 @@ pub(crate) struct ScanPageState {
     pub(crate) engine_loading_remaining: usize,
     pub(crate) walk_files_found: usize,
     pub(crate) engine_scanning_path: Option<String>,
+    /// 威胁列表弹窗是否打开（弹窗渲染见 `pages/scan.rs::threats_modal`）。
+    pub(crate) threats_modal_open: bool,
     #[allow(dead_code)]
     pub(crate) pending_force_quarantine: Option<PendingForceQuarantine>,
     #[allow(dead_code)]
@@ -167,7 +169,9 @@ pub(crate) fn apply_scan_event(
 }
 
 impl ScanPageState {
-    pub(super) fn new(kind: ScanKind) -> Self {
+    /// `pub(crate)`：除 `core::AppCore` 外，`pages/scan.rs` 的 egui_kittest 测试
+    /// 也用它构造弹窗测试状态（见 AGENTS.md「UI 代码验证流程」）。
+    pub(crate) fn new(kind: ScanKind) -> Self {
         Self {
             kind,
             phase: ScanPhase::Idle,
@@ -181,6 +185,7 @@ impl ScanPageState {
             engine_loading_remaining: 0,
             walk_files_found: 0,
             engine_scanning_path: None,
+            threats_modal_open: false,
             pending_force_quarantine: None,
             force_quarantine_rx: None,
             force_quarantine_path: None,
@@ -199,6 +204,7 @@ impl ScanPageState {
             return;
         }
         self.threats.clear();
+        self.threats_modal_open = false;
         self.last_error = None;
         self.started_at = Some(Instant::now());
         self.engine_loading = false;
@@ -236,6 +242,7 @@ impl ScanPageState {
             return;
         }
         self.threats.clear();
+        self.threats_modal_open = false;
         self.last_error = None;
         self.started_at = Some(Instant::now());
         self.engine_loading = false;
@@ -300,7 +307,9 @@ impl ScanPageState {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.force_quarantine_rx = None;
                 self.force_quarantine_path = None;
-                Some(Err("Force quarantine thread stopped unexpectedly".to_string()))
+                Some(Err(
+                    "Force quarantine thread stopped unexpectedly".to_string()
+                ))
             }
         }
     }
@@ -392,9 +401,7 @@ mod tests {
             processes_total: 10,
             files_found: 42,
         });
-        state.apply(ScanEvent::ScanStarted {
-            total: Some(42),
-        });
+        state.apply(ScanEvent::ScanStarted { total: Some(42) });
         match state.phase {
             ScanPhase::Scanning {
                 total,
@@ -425,9 +432,7 @@ mod tests {
         assert_eq!(state.threats.len(), 1);
         assert_eq!(state.threats[0].virus_name, "EICAR");
         match state.phase {
-            ScanPhase::Scanning {
-                scanned, total, ..
-            } => {
+            ScanPhase::Scanning { scanned, total, .. } => {
                 assert_eq!(scanned, 1);
                 assert_eq!(total, Some(1));
             }
@@ -471,9 +476,7 @@ mod tests {
         assert!(state.started_at.is_none());
         match state.phase {
             ScanPhase::Done {
-                scanned,
-                cancelled,
-                ..
+                scanned, cancelled, ..
             } => {
                 assert_eq!(scanned, 5);
                 assert!(!cancelled);

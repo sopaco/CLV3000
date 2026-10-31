@@ -9,7 +9,14 @@ mod pages;
 mod settings;
 mod util;
 
+#[cfg(test)]
+mod ui_preview;
+
 pub use app_shell::App;
+
+/// 关于独占窗口的尺寸（关于窗的 UI 测试要用它还原真实窗口大小）。
+#[cfg(test)]
+pub(crate) use lifecycle_view::ABOUT_WINDOW_SIZE;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Page {

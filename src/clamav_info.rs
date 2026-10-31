@@ -121,6 +121,41 @@ fn first_line(text: &str) -> String {
     text.lines().next().unwrap_or(text).trim().to_string()
 }
 
+/// 把版本串拆成「编号 + 日期」两段，供界面分两行展示。
+///
+/// `parse_database_from_clamscan_v` 产出的形态是 `28170 (Sat Oct 31 14:24:42
+/// 2026)`——整串塞进一行太占地方（仪表盘信息卡的主值位只有 ~170px，会被
+/// 中间省略成没用的碎片），拆开后编号当主值、日期当说明行。
+///
+/// 编号是 ClamAV 每日签名库（daily.cvd）的**版本号**，不是数量——所以保持
+/// 原始数字形态（`28170`），不加千分位：加了逗号会被读成"两万多条签名"，
+/// 跟 `clamscan -V` 的输出也对不上了。
+/// 引擎缺失时回退的签名文件名列表（`daily.cvd, daily.cld`）拆不出日期，
+/// 这时第二个返回值为 `None`。
+pub fn split_version(raw: &str) -> (String, Option<String>) {
+    let raw = raw.trim();
+    if let Some(open) = raw.find('(') {
+        let head = raw[..open].trim();
+        let tail = raw[open + 1..].trim_end_matches(')').trim();
+        if !head.is_empty() && !tail.is_empty() {
+            return (head.to_string(), Some(short_date(tail)));
+        }
+    }
+    (raw.to_string(), None)
+}
+
+/// `Sat Oct 25 09:32:57 2026` → `Oct 25, 2026`；结构不认识就原样返回。
+fn short_date(raw: &str) -> String {
+    let parts: Vec<&str> = raw.split_whitespace().collect();
+    // 形如 `Wdy Mon DD HH:MM:SS YYYY`——DD 可能是单位数（`Jan  1` 里有两个
+    // 空格，split_whitespace 已经归一），所以按"5 段 + 末段是 4 位年"判定。
+    if parts.len() == 5 && parts[4].len() == 4 && parts[4].chars().all(|c| c.is_ascii_digit()) {
+        format!("{} {}, {}", parts[1], parts[2], parts[4])
+    } else {
+        raw.to_string()
+    }
+}
+
 /// 引擎不可用时，尽量从 `database\` 目录里的签名文件推断状态。
 fn summarize_database_files() -> String {
     let dir = paths::resolved_clamav_database_dir().unwrap_or_else(paths::clamav_database_dir);

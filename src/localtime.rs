@@ -21,6 +21,14 @@ impl Timestamp {
         imp::now()
     }
 
+    /// 星期几（0 = 周一 … 6 = 周日）。定时扫描按"周内天 + 固定时刻"设定，
+    /// 需要把日期换算成星期几——用 Howard Hinnant 的 days_from_civil 算法
+    /// （1970-01-01 是周四，往前推 3 天对齐"周一=0"）。
+    pub fn weekday(&self) -> u8 {
+        let days = days_from_civil(self.year as i64, self.month as i64, self.day as i64);
+        ((days + 3).rem_euclid(7)) as u8
+    }
+
     /// 渲染成"今天 09:12" / "8月8日 09:12" 这种展示文案，`today` 用于判断是否是当天。
     pub fn display_relative_to(&self, today: &Timestamp) -> String {
         if self.year == today.year && self.month == today.month && self.day == today.day {
@@ -32,6 +40,17 @@ impl Timestamp {
             )
         }
     }
+}
+
+/// 公历日期 → 距 1970-01-01 的天数（Howard Hinnant's algorithm）。
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400; // [0, 399]
+    let mp = (m + 9) % 12; // 3月=0 … 2月=11
+    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
 }
 
 #[cfg(windows)]

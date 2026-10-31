@@ -1,6 +1,6 @@
 [package]
 name = "clv3000"
-version = "0.7.7"
+version = "0.7.8"
 edition = "2024"
 
 [dependencies]
@@ -16,6 +16,12 @@ toml = "1.1.4"
 tray-icon = "0.24.2"
 walkdir = "2.5.0"
 blake3 = "1"   # 文件基因缓存：内容哈希，纯 Rust、跨平台、比 SHA-256 快很多
+
+# UI 无头测试（见 AGENTS.md「UI 代码验证流程」与 .claude/skills/clv3000-egui-patterns）。
+# 版本必须与 egui 严格同线（0.36.x）；仅测试用，不进 release 二进制。
+# snapshot：把渲染结果落盘成图片做视觉回归（CPU 光栅化，不需要 wGPU/GPU）。
+[dev-dependencies]
+egui_kittest = { version = "0.36.1", default-features = false, features = ["snapshot"] }
 
 # 只在真的编译 Windows 目标时才拉 `windows` crate 及其一大串子 crate 进依赖图——
 # 这些子 crate 里有的（比如 windows-future）在非 Windows target 上编译不干净，
