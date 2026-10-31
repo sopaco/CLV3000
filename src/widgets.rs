@@ -80,6 +80,32 @@ pub fn primary_button_named(
     accessible_label: &str,
     draw: impl FnOnce(&egui::Painter, egui::Rect, Stroke),
 ) -> bool {
+    primary_button_named_inner(ui, label, accessible_label, draw, None)
+}
+
+/// 同 `primary_button_named`，但**强制按钮本体宽度**为 `width`。
+///
+/// 图标 + 文字整体在按钮内水平居中（宽度被撑大时不会把内容挤在左边、
+/// 右侧留一大块空）。用途：一列按钮（实底主动作 + 描边次动作）需要左右
+/// 边缘严格对齐时——实底按钮天生比描边按钮每侧多 4px 内边距，两颗按钮
+/// 放在一起宽度必然不等，看着不协调。
+pub fn primary_button_named_sized(
+    ui: &mut Ui,
+    label: &str,
+    accessible_label: &str,
+    draw: impl FnOnce(&egui::Painter, egui::Rect, Stroke),
+    width: f32,
+) -> bool {
+    primary_button_named_inner(ui, label, accessible_label, draw, Some(width))
+}
+
+fn primary_button_named_inner(
+    ui: &mut Ui,
+    label: &str,
+    accessible_label: &str,
+    draw: impl FnOnce(&egui::Painter, egui::Rect, Stroke),
+    width: Option<f32>,
+) -> bool {
     const ICON_SIZE: f32 = ACTION_BTN_ICON_SIZE;
     const ICON_GAP: f32 = ACTION_BTN_ICON_GAP;
     // 比次操作按钮稍宽一档：实底按钮的分量要配得上它是主动作。
@@ -92,8 +118,10 @@ pub fn primary_button_named(
         .ctx()
         .fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font_id, text_color));
     let text_size = galley.size();
+    // 图标 + 文字这一组的自然宽度；按钮比它宽时这组内容居中。
+    let content_w = ICON_SIZE + ICON_GAP + text_size.x;
     let desired = Vec2::new(
-        H_PAD * 2.0 + ICON_SIZE + ICON_GAP + text_size.x,
+        width.unwrap_or(H_PAD * 2.0 + content_w),
         V_PAD * 2.0 + ICON_SIZE.max(text_size.y),
     );
 
@@ -103,7 +131,10 @@ pub fn primary_button_named(
     let bg_idx = ui.painter().add(egui::Shape::Noop);
     let (bg_rect, response) = ui.allocate_exact_size(desired, Sense::click());
     let icon_rect = egui::Rect::from_min_size(
-        egui::pos2(bg_rect.left() + H_PAD, bg_rect.center().y - ICON_SIZE / 2.0),
+        egui::pos2(
+            bg_rect.left() + (bg_rect.width() - content_w) / 2.0,
+            bg_rect.center().y - ICON_SIZE / 2.0,
+        ),
         Vec2::splat(ICON_SIZE),
     );
     draw(ui.painter(), icon_rect, Stroke::new(1.6, Color32::WHITE));
@@ -1096,16 +1127,19 @@ pub fn action_button(
     action_button_response(ui, label, label, draw).clicked()
 }
 
-/// 同 `action_button`，但可以给一个与可见文字不同的无障碍名（见
-/// `primary_button_named` 的说明：跟侧栏同名项撞 accesskit 名会让 kittest
-/// `get_by_label` 多匹配 panic）。
-pub fn action_button_named(
+/// 同 `action_button`，但**强制按钮本体宽度**为 `width`，并且可以给一个
+/// 与可见文字不同的无障碍名（见 `primary_button_named` 的说明：跟侧栏同名项
+/// 撞 accesskit 名会让 kittest `get_by_label` 多匹配 panic）。
+///
+/// 图标 + 文字整体在按钮内水平居中，语义见 `primary_button_named_sized`。
+pub fn action_button_named_sized(
     ui: &mut Ui,
     label: &str,
     accessible_label: &str,
     draw: impl FnOnce(&egui::Painter, egui::Rect, Stroke),
+    width: f32,
 ) -> bool {
-    action_button_response(ui, label, accessible_label, draw).clicked()
+    action_button_response_inner(ui, label, accessible_label, draw, Some(width)).clicked()
 }
 
 /// 同 `action_button`，但返回完整 `Response`（用于挂 tooltip 等）。
@@ -1114,6 +1148,16 @@ pub fn action_button_response(
     label: &str,
     accessible_label: &str,
     draw: impl FnOnce(&egui::Painter, egui::Rect, Stroke),
+) -> Response {
+    action_button_response_inner(ui, label, accessible_label, draw, None)
+}
+
+fn action_button_response_inner(
+    ui: &mut Ui,
+    label: &str,
+    accessible_label: &str,
+    draw: impl FnOnce(&egui::Painter, egui::Rect, Stroke),
+    width: Option<f32>,
 ) -> Response {
     const ICON_SIZE: f32 = ACTION_BTN_ICON_SIZE;
     const ICON_GAP: f32 = ACTION_BTN_ICON_GAP;
@@ -1126,8 +1170,10 @@ pub fn action_button_response(
         .ctx()
         .fonts_mut(|f| f.layout_no_wrap(label.to_owned(), font_id, text_color));
     let text_size = galley.size();
+    // 图标 + 文字这一组的自然宽度；按钮比它宽时这组内容居中。
+    let content_w = ICON_SIZE + ICON_GAP + text_size.x;
     let desired = Vec2::new(
-        H_PAD * 2.0 + ICON_SIZE + ICON_GAP + text_size.x,
+        width.unwrap_or(H_PAD * 2.0 + content_w),
         V_PAD * 2.0 + ICON_SIZE.max(text_size.y),
     );
 
@@ -1139,7 +1185,10 @@ pub fn action_button_response(
     let bg_idx = ui.painter().add(egui::Shape::Noop);
     let (bg_rect, response) = ui.allocate_exact_size(desired, Sense::click());
     let icon_rect = egui::Rect::from_min_size(
-        egui::pos2(bg_rect.left() + H_PAD, bg_rect.center().y - ICON_SIZE / 2.0),
+        egui::pos2(
+            bg_rect.left() + (bg_rect.width() - content_w) / 2.0,
+            bg_rect.center().y - ICON_SIZE / 2.0,
+        ),
         Vec2::splat(ICON_SIZE),
     );
     draw(

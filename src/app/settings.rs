@@ -460,6 +460,31 @@ fn schedule_editor(ui: &mut egui::Ui, sched: &mut crate::config::ScheduleConfig)
                         .color(colors::TEXT_SECONDARY)
                         .small(),
                 );
+                // ── 让两个时间下拉框垂直对齐 ─────────────────────────────
+                //
+                // 现象：小时框比分钟框高 7px（肉眼就是"没对齐"）。
+                //
+                // 根因：egui 的 ComboBox 不是"按内容定高"的控件——它取
+                // 「所在行当前可用高度」与 `interact_size.y` 的**较大者**作为
+                // 自身高度（egui-0.36 `containers/combo_box.rs` 的 `button_frame`：
+                // `outer_rect.set_height(outer_rect.height().at_least(interact_size.y))`）。
+                // 本主题把 `button_padding` 调成了 (14, 8)，但没动 `interact_size`，
+                // 它还是 egui 默认的 18px；而下拉框的实际内容高
+                // （按钮文字行高 + 2×8px 内边距）约 32px。于是同一行里两个
+                // 下拉框按不同的基准参与行的交叉轴对齐，越靠后的偏得越多
+                // （实测两框中心相差 7px）。
+                //
+                // 修法：把这一行的基准高度 `interact_size.y` 提到下拉框的实际
+                // 内容高度，"行基准"与"控件高"一致，两个框的垂直中心就对齐了
+                // （实测偏差 0）。这个 `Ui` 里只有两个下拉框是交互控件，
+                // 标签/chip 不受影响。
+                let combo_h = ui
+                    .text_style_height(&egui::TextStyle::Button)
+                    .max(ui.spacing().icon_width)
+                    + 2.0 * ui.spacing().button_padding.y;
+                if ui.spacing().interact_size.y < combo_h {
+                    ui.spacing_mut().interact_size.y = combo_h;
+                }
                 egui::ComboBox::from_id_salt("schedule_hour")
                     .selected_text(format!("{:02}", sched.hour))
                     .width(52.0)
@@ -577,4 +602,66 @@ fn context_menu_row(ui: &mut egui::Ui, _app: &mut App) {
         "Not available on this platform yet.",
         false,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    //! egui_kittest 驱动**真实**组件的 UI 测试（见 AGENTS.md「UI 代码验证流程」）。
+
+    use super::schedule_editor;
+    use crate::config::ScheduleConfig;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    /// 计划编辑器里"小时 / 分钟"两个下拉框必须上下对齐。
+    ///
+    /// 2026-10 用户反馈"时间选择区域的小时和分钟没有对齐"（实测两个下拉框的
+    /// 垂直中心相差 7px）。
+    ///
+    /// 根因不是"两个文案宽度不同"（那只影响宽度，不影响高度），而是 egui 的
+    /// ComboBox 不是"按内容定高"的控件：它取「所在行当前可用高度」与
+    /// `interact_size.y` 的**较大者**作为自身高度（egui-0.36
+    /// `containers/combo_box.rs` 的 `button_frame`）。本主题把 `button_padding`
+    /// 调成 (14, 8) 但没动 `interact_size`，它还是 egui 默认的 18px，而下拉框
+    /// 的实际内容高约 32px——同一行里两个下拉框按不同基准参与行的交叉轴
+    /// 对齐，越靠后偏得越多。
+    ///
+    /// 修法见 `schedule_editor`：把该行的 `interact_size.y` 提到下拉框的实际
+    /// 内容高度。
+    ///
+    /// 判据：两个下拉框的**垂直中心**必须一致（允许 1px 的取整误差）。
+    #[test]
+    fn schedule_hour_minute_dropdowns_are_aligned() {
+        let mut harness = Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 600.0))
+            .with_max_steps(10)
+            .build_ui_state(
+                |ui, sched: &mut ScheduleConfig| {
+                    schedule_editor(ui, sched);
+                },
+                ScheduleConfig {
+                    days_mask: 0b0100_1010,
+                    hour: 9,
+                    minute: 30,
+                    scan_full: false,
+                },
+            );
+        crate::theme::apply(&harness.ctx);
+        harness.run();
+
+        // ComboBox 在 accesskit 树里是 `Role::ComboBox`，值就是选中的文本。
+        let hour = harness.get_by_value("09").rect();
+        let minute = harness.get_by_value("30").rect();
+
+        let hour_center = hour.center().y;
+        let minute_center = minute.center().y;
+        assert!(
+            (hour_center - minute_center).abs() <= 1.0,
+            "小时/分钟下拉框未上下对齐：小时中心 y={hour_center:.1}，分钟中心 y={minute_center:.1}，\
+             相差 {:.1}px（小时 {:?}，分钟 {:?}）",
+            (hour_center - minute_center).abs(),
+            hour,
+            minute
+        );
+    }
 }

@@ -9,7 +9,7 @@ use super::super::{App, Page};
 use crate::icons;
 use crate::localtime::Timestamp;
 use crate::theme::colors;
-use crate::widgets::{self, action_button_named, primary_button_named};
+use crate::widgets::{self, action_button_named_sized, primary_button_named_sized};
 use eframe::egui;
 use egui::{Color32, Stroke, Vec2};
 
@@ -205,6 +205,14 @@ fn hero_text(ui: &mut egui::Ui, flavor: &HeroFlavor, title: &str, sub: &str) {
 /// 英雄卡的动作列（竖排两颗按钮；扫描中只有一颗"View Progress"）。
 fn hero_actions(ui: &mut egui::Ui, app: &mut App, spec: &HeroActions) {
     let (primary_label, primary_page) = spec.primary;
+    // 动作列里的按钮**统一宽度**：实底主操作天生比描边次操作每侧多 4px 内边距
+    // （`primary_button` 的 H_PAD = ACTION_BTN_H_PAD + 4），两个文案宽度也不同
+    // （"Quick Scan" 比 "Full Scan" 宽），两者叠在一起宽度必然不等——实测实底
+    // 按钮比描边按钮宽 ~18px，左边缘对齐、右边缘参差，看着不协调。
+    //
+    // 统一成列宽后，图标 + 文字在按钮内居中，两颗按钮的左右边缘严格对齐；
+    // 实底按钮仍然是实底（主次之分靠填充/描边区分，不靠宽度）。
+    let col_w = hero_actions_width(ui, spec);
     // 无障碍名跟可见文字区分开：跟侧栏同名导航项撞名会让 kittest
     // `get_by_label` 多匹配 panic；"Start …" 仍包含可见文字（WCAG 2.5.3）。
     let primary_accessible = format!("Start {primary_label}");
@@ -216,11 +224,12 @@ fn hero_actions(ui: &mut egui::Ui, app: &mut App, spec: &HeroActions) {
         } else {
             Page::FullScan
         };
-        if action_button_named(
+        if action_button_named_sized(
             ui,
             primary_label,
             &primary_accessible,
             |p, r, s| icons::shield(p, r, s, None),
+            col_w,
         ) {
             app.navigate(target);
         }
@@ -230,7 +239,7 @@ fn hero_actions(ui: &mut egui::Ui, app: &mut App, spec: &HeroActions) {
         Page::FullScan => icons::computer,
         _ => |p, r, s| icons::bolt(p, r, s.color),
     };
-    if primary_button_named(ui, primary_label, &primary_accessible, primary_icon) {
+    if primary_button_named_sized(ui, primary_label, &primary_accessible, primary_icon, col_w) {
         start_from_dashboard(app, primary_page);
     }
     if let Some((secondary_label, secondary_page)) = spec.secondary {
@@ -240,7 +249,13 @@ fn hero_actions(ui: &mut egui::Ui, app: &mut App, spec: &HeroActions) {
             Page::FullScan => icons::computer,
             _ => |p, r, s| icons::bolt(p, r, s.color),
         };
-        if action_button_named(ui, secondary_label, &secondary_accessible, secondary_icon) {
+        if action_button_named_sized(
+            ui,
+            secondary_label,
+            &secondary_accessible,
+            secondary_icon,
+            col_w,
+        ) {
             start_from_dashboard(app, secondary_page);
         }
     }
@@ -436,7 +451,9 @@ fn stat_cards(ui: &mut egui::Ui, app: &mut App, today: &Timestamp) {
     let (db_value, db_date) = match &db_version {
         Some(v) => {
             let (build, date) = crate::clamav_info::split_version(v);
-            (crate::clamav_info::format_build_number(&build), date)
+            // 版本号保持原始数字形态（`28170`）——它是 ClamAV 每日签名库的版本号，
+            // 不是数量，加千分位会被读成"数量"。
+            (build, date)
         }
         None => ("Checking…".to_string(), None),
     };
@@ -574,6 +591,47 @@ mod tests {
         assert!(
             matches!(app.core.page, Page::QuickScan),
             "点击信息卡应跳转对应页面"
+        );
+    }
+
+    /// 英雄卡动作列：主操作（实底）与次操作（描边）必须**等宽**。
+    ///
+    /// 2026-10 用户反馈"Dashboard 中的 Quick Scan 和 Full Scan 按钮宽度没有
+    /// 一致，看起来不和谐"（实测实底按钮比描边按钮宽 ~18px）。
+    ///
+    /// 根因：实底主按钮每侧多 4px 内边距（`primary_button` 的
+    /// `H_PAD = ACTION_BTN_H_PAD + 4`），加上两个文案宽度也不同（"Quick Scan"
+    /// 比 "Full Scan" 宽），两颗按钮的宽度必然不等。
+    ///
+    /// 判据：两个按钮的宽度必须一致（允许 0.5px 的取整误差）。
+    #[test]
+    fn dashboard_scan_buttons_have_equal_width() {
+        let mut harness = Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 600.0))
+            .with_max_steps(10)
+            .build_ui_state(
+                |ui, app| {
+                    let app = app.get_or_insert_with(|| {
+                        let mut app = App::new(ui.ctx(), None, InitialMode::ShowWindow);
+                        app.core.config = crate::config::AppConfig::default();
+                        app.core.virus_db.db_version = Some("ClamAV 1.4.4/28088".to_string());
+                        app
+                    });
+                    let ctx = ui.ctx().clone();
+                    dashboard_page(ui, &ctx, app);
+                },
+                None,
+            );
+        harness.run();
+
+        let quick = harness.get_by_label("Start Quick Scan").rect();
+        let full = harness.get_by_label("Start Full Scan").rect();
+        assert!(
+            (quick.width() - full.width()).abs() <= 0.5,
+            "Quick Scan / Full Scan 按钮宽度不一致：{:.1} vs {:.1}（相差 {:.1}px）",
+            quick.width(),
+            full.width(),
+            (quick.width() - full.width()).abs()
         );
     }
 }

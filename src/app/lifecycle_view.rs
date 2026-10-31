@@ -11,7 +11,23 @@ use tray_icon::TrayIconEvent;
 
 /// 主窗口默认尺寸（与 `main.rs` 里 `with_inner_size` 一致）。
 pub(super) const MAIN_WINDOW_SIZE: [f32; 2] = [900.0, 600.0];
-pub(super) const ABOUT_WINDOW_SIZE: [f32; 2] = [480.0, 472.0];
+/// 关于独占窗口的尺寸。
+///
+/// 高度不是随手取的：自绘标题栏占 44px，中央面板上下各留 8px 边距，剩下
+/// 的客户区交给关于卡片——卡片**正好铺满**这块区域（见 `about_dialog.rs`
+/// 的 `paint_about_fullscreen`），多出来的空间变成卡片内部的留白。
+///
+/// 两个坑都在这高度上：
+/// - 卡片比可用高度**高** → 中央面板把底部裁掉，被裁的正好是 OK 按钮下方
+///   的留白，按钮贴到窗口边（Windows 上最初报的问题）。
+/// - 窗口比卡片**高** → 多出来的空间全落在卡片下方，看着像"下方多了一条
+///   黑条"（macOS 上报的问题）。
+///
+/// 512 = 44（标题栏）+ 8（左右边距）+ 460（卡片），卡片内高 404 放得下
+/// 主体（≈330）+ 按钮区（≈64）+ 一点弹性间隙。
+///
+/// 改了这里必须同步改 `main.rs` 里的 `MIN_INNER_SIZE`（两处高度约定相等）。
+pub(crate) const ABOUT_WINDOW_SIZE: [f32; 2] = [480.0, 512.0];
 
 #[cfg(target_os = "macos")]
 pub(super) const ACTIVATE_FRAMES: u8 = 12;

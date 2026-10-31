@@ -1,11 +1,11 @@
 ---
 type: project
 project: clv3000
-title: CLV3000
+title: clv3000
 source: .
 ---
 
-# CLV3000
+# clv3000
 
 
 
@@ -19,48 +19,41 @@ source: .
 
 ## Structure
 
-  - .agents/
-    - skills/
-  - .cargo/
-    - config.toml
-  - .claude/
-    - skills/
-  - .gitignore
-  - AGENTS.md
-  - assets/
-    - backgrounds/
-    - icons/
-    - introduce_clv3000.png
-    - snapshots/
-  - build.rs
-  - Cargo.lock
   - Cargo.toml
-  - CLAUDE.md
   - LICENSE
+  - Cargo.lock
+  - build.rs
   - README.md
   - scripts/
     - bundle-macos.sh
+  - AGENTS.md
+  - assets/
+    - snapshots/
+    - backgrounds/
+    - icons/
+    - introduce_clv3000.png
+  - CLAUDE.md
   - src/
-    - about_dialog.rs
-    - app/
+    - windows_chrome.rs
     - autostart.rs
-    - clamav_info.rs
-    - clv3000_plus.rs
-    - config.rs
-    - context_menu.rs
     - icons.rs
+    - app/
+    - context_menu.rs
+    - config.rs
     - icon_data.rs
-    - lifecycle.rs
-    - localtime.rs
-    - macos_reopen.rs
-    - main.rs
-    - paths.rs
-    - quarantine.rs
-    - scan/
-    - single_instance.rs
     - sysmon.rs
+    - paths.rs
     - theme.rs
     - tray.rs
+    - clamav_info.rs
     - wakeup.rs
+    - macos_reopen.rs
+    - scan/
+    - about_dialog.rs
+    - localtime.rs
+    - main.rs
+    - clv3000_plus.rs
+    - lifecycle.rs
+    - quarantine.rs
     - widgets.rs
-    - windows_chrome.rs
+    - single_instance.rs

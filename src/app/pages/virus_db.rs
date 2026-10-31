@@ -80,20 +80,17 @@ fn db_card(ui: &mut egui::Ui, app: &mut App) {
             // "cursor 起可用宽度"，开头调就是整卡宽。）
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
-                // 图标砖：品牌蓝底纹 + database 图形，跟页头的图标砖同一语言，
-                // 只是这一张是页面的主视觉，尺寸放大到 64。
-                let (tile_resp, painter) =
+                // 主视觉：正式品牌图标（`icon_app.png`，跟"关于"页同一张图）。
+                // 原来是"品牌蓝底纹 + 单色 database 图形"的占位式图标砖——本页
+                // 讲的就是 CLV3000 的病毒库，用品牌图标更贴切（用户 2026-10
+                // 明确要求换成 app 图标）。
+                let (tile_resp, _painter) =
                     ui.allocate_painter(Vec2::splat(64.0), egui::Sense::hover());
-                painter.rect_filled(
-                    tile_resp.rect,
-                    crate::theme::radius::MD,
-                    colors::ACCENT_BLUE_BG,
-                );
-                icons::database(
-                    &painter,
-                    tile_resp.rect.shrink(15.0),
-                    Stroke::new(2.2, colors::ACCENT_BLUE),
-                );
+                let brand = crate::icon_data::app_icon_texture(ui.ctx(), 64.0);
+                egui::Image::new((brand.id(), brand.size_vec2()))
+                    .fit_to_exact_size(Vec2::splat(64.0))
+                    .corner_radius(crate::theme::radius::LG)
+                    .paint_at(ui, tile_resp.rect);
                 ui.add_space(20.0);
                 ui.vertical(|ui| {
                     // 卡里不再重复一遍 "Virus Database"——页头已经写着页面名，
@@ -104,19 +101,30 @@ fn db_card(ui: &mut egui::Ui, app: &mut App) {
                             // 版本串生产形态是 `28167 (Sat Oct 28 09:32:57 2026)`
                             // ——整串一行太占地方，编号与日期拆开：编号当主标题
                             // （加千分位，28,167 更好读），日期挪到状态行。
+                            // 版本号保持原始数字形态（`28170`）——它是 ClamAV 每日
+                            // 签名库的版本号，不是数量，加千分位会被读成"数量"。
                             let (build, date) = crate::clamav_info::split_version(ver);
-                            let build = crate::clamav_info::format_build_number(&build);
-                            let ver_w = (text_w
-                                - widgets::measure_text_width(ui, "Version ", 20.0))
-                            .max(40.0);
-                            widgets::bold_label(
+                            let ver_w =
+                                (text_w - widgets::measure_text_width(ui, "DB version ", 20.0))
+                                    .max(40.0);
+                            // 标签写明是"数据库的版本号"，不是 CLV3000 的版本号，
+                            // 也不是病毒数量——用户看到 "Version 28,170" 会问
+                            // "这到底是什么版本"（2026-10 反馈）。悬停再给一句
+                            // 完整解释：这是 ClamAV 每日签名库（daily.cvd）的版本号，
+                            // 每次每日签名更新都会往上加，数字越大签名越新。
+                            let ver_label = widgets::bold_label(
                                 ui,
                                 &format!(
-                                    "Version {}",
+                                    "DB version {}",
                                     widgets::truncate_middle_to_px(ui, &build, 20.0, ver_w)
                                 ),
                                 20.0,
                                 colors::TEXT_PRIMARY,
+                            );
+                            ver_label.on_hover_text(
+                                "ClamAV daily signature database version (daily.cvd).\n\
+                                 The number increases with every daily signature release —\n\
+                                 higher means newer virus definitions.",
                             );
                             ui.add_space(6.0);
                             let status = match (available, date) {

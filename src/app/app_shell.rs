@@ -24,7 +24,6 @@ pub struct App {
     pub(super) allow_exit: bool,
     pub(super) app_icon_texture: Option<egui::TextureHandle>,
     pub(super) titlebar_icon_texture: Option<egui::TextureHandle>,
-    pub(super) dotted_bg_texture: Option<egui::TextureHandle>,
     pub(super) window_hidden: bool,
     pub(super) activate_countdown: u8,
     pub(super) size_intent: u8,
@@ -95,7 +94,6 @@ impl App {
             allow_exit: false,
             app_icon_texture: None,
             titlebar_icon_texture: None,
-            dotted_bg_texture: None,
             window_hidden,
             activate_countdown: 0,
             size_intent: 0,
@@ -142,13 +140,6 @@ impl App {
                 crate::icon_data::load_tray_icon(64),
             ));
         }
-        if self.dotted_bg_texture.is_none() {
-            self.dotted_bg_texture = Some(ctx.load_texture(
-                "dotted_bg_tile",
-                theme::dotted_tile_image(),
-                egui::TextureOptions::LINEAR_REPEAT,
-            ));
-        }
     }
 
     pub(super) fn release_ui_resources(&mut self, ctx: &egui::Context) {
@@ -161,7 +152,6 @@ impl App {
         });
         self.app_icon_texture.take();
         self.titlebar_icon_texture.take();
-        self.dotted_bg_texture.take();
         self.toasts.clear();
         self.last_sample = ResourceSample::default();
     }
@@ -335,15 +325,9 @@ impl App {
             )
             .show(ui, |ui| super::chrome::sidebar(ui, &ctx, self));
 
-        let dotted_bg_texture = self.dotted_bg_texture.clone();
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(colors::BG_APP))
             .show(ui, |ui| {
-                theme::paint_dotted_background(
-                    ui.painter(),
-                    ui.max_rect(),
-                    dotted_bg_texture.as_ref(),
-                );
                 let page = self.core.page;
                 match page {
                     Page::Dashboard => super::pages::dashboard_page(ui, &ctx, self),

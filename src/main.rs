@@ -52,10 +52,17 @@ fn main() {
     if !single_instance::acquire() {
         let forwarded = if let Some(path) = &scan_path_cli {
             single_instance::forward_scan_request(path)
-        } else if show_cli {
-            single_instance::forward_show_request()
         } else {
-            false
+            // 已经在跑：把"把主窗口显示出来并置前"的请求转发给主实例。
+            //
+            // 这一条覆盖两种入口——显式 `--show`，以及**用户直接又点了一次
+            // 图标**（Windows 上双击 exe 没有 `--show` 参数，但语义完全相同：
+            // "我想看一眼主界面"）。旧行为是弹一个"已经在运行，请先退出旧实例"
+            // 的提示框：用户明明只想把窗口叫出来，却被告知要去托盘里手动退出，
+            // 跟单实例保护的初衷正好相反。主实例收到请求后会走
+            // `request_show_window` → `Visible(true)` + `bring_to_front`，
+            // 窗口直接回到前台。
+            single_instance::forward_show_request()
         };
         if !forwarded {
             // 转发失败（极少数情况，比如具名事件/socket 都打不开）：退回旧行为，
@@ -258,7 +265,7 @@ fn build_viewport(window_icon: egui::IconData) -> egui::ViewportBuilder {
     // 会把关于窗口夹到这个最小值、缩不小、背后仍留大片黑底。高度故意跟
     // ABOUT_WINDOW_SIZE 的高度保持相等（不只是"≤"）：自绘标题栏占 44px，两处高度
     // 改动要一起改。
-    const MIN_INNER_SIZE: [f32; 2] = [440.0, 472.0];
+    const MIN_INNER_SIZE: [f32; 2] = [440.0, 512.0];
 
     let mut builder = egui::ViewportBuilder::default()
         .with_title("CLV3000")

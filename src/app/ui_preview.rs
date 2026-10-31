@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 /// 与 `main.rs::build_viewport` 的默认窗口一致——预览即用户实际看到的比例。
 const WINDOW_SIZE: egui::Vec2 = egui::Vec2::new(900.0, 600.0);
 
-fn save(harness: &mut Harness<'_, Option<App>>, name: &str) -> image::RgbaImage {
+fn save<S>(harness: &mut Harness<'_, S>, name: &str) -> image::RgbaImage {
     let image = harness.render().expect("CPU 光栅化渲染失败");
     let dir = std::path::Path::new("target/ui_preview");
     std::fs::create_dir_all(dir).expect("创建 target/ui_preview 失败");
@@ -340,6 +340,32 @@ fn render_ui_preview() {
     settle(&mut harness);
     let img = save(&mut harness, "16-full-idle-first-run");
     analysis::ascii_preview("16-full-idle-first-run", &img);
+
+    // 17. 关于窗（独占视图）——真实窗口尺寸 480×528。
+    //
+    // 这个页面此前**没有进预览**：关于卡片按内容自然排版（高 ≈452px），比窗口
+    // 客户区（528 - 44 自绘标题栏 = 484px）只差一点点，一旦窗口再矮一点就被
+    // 中央面板裁掉底部，OK 按钮直接贴到窗口边——正是 2026-10 用户反馈的问题。
+    // 没有预览就没人看得出来，所以这里补一张（见 `about_dialog.rs` 里
+    // `about_ok_button_keeps_bottom_gap` 的回归测试）。
+    {
+        let mut about = Harness::builder()
+            .with_size(egui::Vec2::new(
+                super::ABOUT_WINDOW_SIZE[0],
+                super::ABOUT_WINDOW_SIZE[1],
+            ))
+            .with_max_steps(10)
+            .renderer(software_renderer::SoftwareRenderer::default())
+            .build_ui_state(
+                |ui, _: &mut ()| {
+                    crate::about_dialog::paint_about_fullscreen(ui);
+                },
+                (),
+            );
+        crate::theme::apply(&about.ctx);
+        about.run_steps(8);
+        save(&mut about, "17-about");
+    }
 }
 
 /// 纯 CPU 软件光栅化 `TestRenderer`：把 egui tessellate 出的三角形网格逐像素
@@ -847,17 +873,20 @@ mod analysis {
                 c[0], c[1], c[2]
             );
         }
-        // 4. 点阵可见度：页头与英雄卡之间的净空带（y≈120..132），最大亮度与
-        //    背景差。（信息卡行下方只剩 y543..549 几像素，不够采样。）
+        // 4. 背景纯净度：页头与英雄卡之间的净空带（y≈120..132）应完全等于
+        //    背景色——2026-10 用户反馈点阵底纹"太难看"已整体移除，这里反向
+        //    守住：净空带上不得出现任何非背景像素（回归即说明底纹又回来了）。
         let mut max_l = 0.0f32;
+        let mut min_l = f32::MAX;
         for y in 120u32..132 {
             for x in 220u32..880 {
-                max_l = max_l.max(luminance(px(img, x, y)));
+                let l = luminance(px(img, x, y));
+                max_l = max_l.max(l);
+                min_l = min_l.min(l);
             }
         }
         println!(
-            "  点阵区域最大亮度 {max_l:.1}（背景 ≈16，差 {:.1}）",
-            max_l - luminance(BG)
+            "  背景净空带亮度区间 [{min_l:.1}, {max_l:.1}]（背景 ≈16；极差应 ≈0，非 0 说明底纹回来了）"
         );
         // 5. 卡片列居中：BG_CARD 色块（英雄卡+三张信息卡）的联合包围盒中点
         //    vs 内容区中心（内容区 x 208..892，中心 = 550）。
