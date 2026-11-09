@@ -15,7 +15,7 @@ CLV3000 是面向 Windows 与 macOS 的便携式按需杀毒扫描器，使用 R
 
 | 容器 | 分层 | 职责 |
 |------|------|------|
-| App UI | 表现层 + 应用层 | egui 页面、`AppCore`/`ScanPageState`、设置、病毒库视图 |
+| App UI | 表现层 + 应用层 | egui 页面、`AppCore`/`ScanPageState`、设置、病毒库视图、关于独占窗口 |
 | Auto Scan Scheduler | 应用层 | 开机/定时/更新后自动扫描的到点判定与去重 |
 | Scan Engine | 领域层 | 路径枚举、预扫缓存/签名、ClamAV 封装 |
 | Threat Management | 领域层 | 隔离区、忽略列表、还原 |
@@ -23,7 +23,7 @@ CLV3000 是面向 Windows 与 macOS 的便携式按需杀毒扫描器，使用 R
 | Platform Layer | 基础设施层 | 托盘、单实例 IPC、开机自启、右键菜单 |
 | ClamAV | 外部子进程 | 可执行文件旁的 `clamscan` / `freshclam` |
 
-**模式：** 带类型事件的扫描流水线；`ScanPhase` 状态机（Idle → Enumerating → Scanning → Done）；`AppCore::poll_background` 每帧轮询自动更新与自动扫描计划（内部节流）；`#[cfg(...)]` 平台策略，Linux 下用 mock 支持 UI 预览；单实例锁 + 扫描/显示请求转发。
+**模式：** 带类型事件的扫描流水线；`ScanPhase` 状态机（Idle → Enumerating → Scanning → Done）；`AppCore::poll_background` 每帧轮询自动更新与自动扫描计划（内部节流）；生命周期视图对账（主窗 / 托盘 / 关于独占窗口，切换视口可见性与尺寸）；`#[cfg(...)]` 平台策略，Linux 下用 mock 支持 UI 预览；单实例锁 + 扫描/显示请求转发。
 
 **主要依赖：** eframe/egui 0.36（glow）、sysinfo、walkdir、blake3、muda/tray-icon、windows crate（Win32）、objc2（macOS）；测试用 egui_kittest 0.36.1。
 
@@ -41,13 +41,14 @@ User/CLI → lifecycle (main.rs) → App UI ←ScanEvent— Scan thread
 |------|------|----------|
 | app | UI 外壳、页面路由、扫描编排、设置 | `src/app/`, `src/app/app_shell.rs`, `src/app/pages/` |
 | app/core | 跨帧状态：路由、配置、扫描阶段、设置页、病毒库、自动扫描调度 | `src/app/core/` |
+| about | 托盘触发的「关于」独占窗口；预留主窗内覆盖层模态 | `src/about_dialog.rs` |
 | scan | 枚举、引擎流水线、内容缓存、Authenticode 跳过 | `src/scan/` |
 | quarantine | 威胁文件移入隔离区；还原 | `src/quarantine.rs` |
 | persistence | 用户配置（TOML）与便携路径布局 | `src/config.rs`, `src/paths.rs` |
 | lifecycle | CLI 解析、启动模式、运行/托盘切换 | `src/lifecycle.rs`, `src/main.rs` |
 | platform | 托盘、IPC、开机自启、资源管理器右键菜单、唤醒 | `src/tray.rs`, `src/single_instance.rs`, `src/autostart.rs`, `src/context_menu.rs`, `src/wakeup.rs` |
 | system-integration | ClamAV 探测、病毒库更新（freshclam）、版本查询 | `src/app/freshclam.rs`, `src/clamav_info.rs`, `src/app/core/virus_db.rs` |
-| ui-infra | 主题、控件、资源监视、平台窗口外壳 | `src/theme.rs`, `src/widgets.rs`, `src/icons.rs`, `src/sysmon.rs`, `src/windows_chrome.rs`, `src/app/chrome.rs` |
+| ui-infra | 主题、控件、图标与品牌图、资源监视、平台窗口外壳 | `src/theme.rs`, `src/widgets.rs`, `src/icons.rs`, `src/icon_data.rs`, `src/sysmon.rs`, `src/windows_chrome.rs`, `src/app/chrome.rs` |
 | ui-testing | 无头 egui_kittest 测试与 PNG 视觉预览 | `src/app/ui_preview.rs`, 组件同文件 `mod tests` |
 | build/packaging | macOS 打包脚本、Windows 资源 | `build.rs`, `scripts/bundle-macos.sh` |
 
@@ -58,8 +59,9 @@ User/CLI → lifecycle (main.rs) → App UI ←ScanEvent— Scan thread
 1. 解析 CLI（`--tray-only`、`--show`、`--scan-path`，Windows 专用 `--force-quarantine` 在单实例检查前直接执行提权隔离子进程并退出）。
 2. 尝试 `single_instance::acquire`；若锁被占用，则把扫描/显示请求写入 IPC（Windows：`scan_request.txt` + 事件；macOS：Unix socket）后退出，转发失败时提示“已在运行”。
 3. 初始化 `wakeup`、启动请求监听线程、构建系统托盘。
-4. 解析 `InitialMode`；Windows 托盘启动时在 eframe 之外运行 Win32 消息循环（`wait_in_tray`），避免闪窗。
-5. 启动 `eframe::run_native`，用 `&egui::Context` 构造 `App`；首帧按生命周期对账窗口可见性，之后每帧 `App::logic` 调用 `AppCore::poll_background` 处理自动更新与自动扫描。
+4. 解析 `InitialMode`（`ShowWindow` / `TrayOnly` / `QuickScan` / `About` / `ScanPath`）；Windows 托盘启动时在 eframe 之外运行 Win32 消息循环（`wait_in_tray`），避免闪窗；托盘菜单「关于」以 `About` 模式启动。
+5. 启动 `eframe::run_native`，用 `&egui::Context` 构造 `App`；`TrayOnly` 与 `About` 均以隐藏姿态创建，首帧由 `reconcile_lifecycle` 对账可见性与视口尺寸（主窗 900×600、关于窗 480×512），之后每帧 `App::logic` 调用 `AppCore::poll_background` 处理自动更新与自动扫描。
+6. 关闭关于独占窗（OK / Esc / 标题栏关闭）后：原为托盘模式则 `hide_to_tray` 回到托盘，否则恢复主窗尺寸。
 
 ### 2. 闪电扫描
 
@@ -89,7 +91,7 @@ User/CLI → lifecycle (main.rs) → App UI ←ScanEvent— Scan thread
 
 - **语言：** Rust 2024 edition（v0.7.8）
 - **GUI：** eframe 0.36 + egui 0.36（glow 后端，默认字体）
-- **测试：** egui_kittest 0.36.1（dev-dependency，`snapshot` feature）；组件同文件无头 UI 测试；`src/app/ui_preview.rs` 将真实 `App` 的 13 个状态渲染为 `target/ui_preview/*.png`（`#[ignore]`）
+- **测试：** egui_kittest 0.36.1（dev-dependency，`snapshot` feature）；组件同文件无头 UI 测试；`src/app/ui_preview.rs` 将真实 `App` 的 18 个状态（含关于独占窗口）渲染为 `target/ui_preview/*.png`（`#[ignore]`）
 - **扫描引擎：** ClamAV 子进程（`clamscan`、`freshclam`）——不走 libclamav FFI
 - **进程枚举：** sysinfo；Windows Toolhelp32 通过 `windows` crate
 - **签名预过滤：** Windows WinVerifyTrust / macOS codesign（`src/scan/authenticode.rs`）
@@ -129,8 +131,8 @@ User/CLI → lifecycle (main.rs) → App UI ←ScanEvent— Scan thread
 | 闪电/全盘枚举 | `src/scan/quick_scan.rs`, `src/scan/full_scan.rs` | 进程模块枚举；磁盘遍历与流式路径列表 |
 | 扫描 UI 状态机 | `src/app/core/scan_state.rs` | `ScanPhase`、`apply_scan_event`、`threats_modal_open` |
 | 自动扫描调度 | `src/app/core/auto_scan.rs` | `AutoScanState`、开机/定时/更新后触发与去重 |
-| 应用外壳与导航 | `src/app/app_shell.rs`, `src/app/chrome.rs`, `src/app/mod.rs` | `App`、标题栏/侧栏/资源条、`Page` 路由 |
+| 应用外壳与导航 | `src/app/app_shell.rs`, `src/app/chrome.rs`, `src/app/mod.rs`, `src/about_dialog.rs` | `App`、标题栏/侧栏/资源条、`Page` 路由、关于独占窗口 |
 | 页面与威胁弹窗 | `src/app/pages/` | 仪表盘、扫描页、病毒库页、设置页；`threats_modal` |
-| 病毒库更新与版本查询 | `src/app/freshclam.rs`, `src/app/core/virus_db.rs`, `src/clamav_info.rs`, `src/app/pages/virus_db.rs` | freshclam 编排、自动检查、版本展示 |
+| 病毒库更新与版本查询 | `src/app/freshclam.rs`, `src/app/core/virus_db.rs`, `src/clamav_info.rs`, `src/app/pages/virus_db.rs` | freshclam 编排、自动检查、版本展示（关于窗经 `ClamAvInfo` 进程内缓存） |
 | 平台集成 | `src/quarantine.rs`, `src/single_instance.rs`, `src/tray.rs`, `src/wakeup.rs`, `src/autostart.rs`, `src/context_menu.rs` | 隔离/还原、IPC、托盘、唤醒、自启、右键菜单 |
-| UI 基础设施与视觉预览 | `src/theme.rs`, `src/widgets.rs`, `src/icons.rs`, `src/app/ui_preview.rs` | 设计令牌、复用控件、图标、无头渲染预览 |
+| UI 基础设施与视觉预览 | `src/theme.rs`, `src/widgets.rs`, `src/icons.rs`, `src/icon_data.rs`, `src/app/ui_preview.rs` | 设计令牌、复用控件（主/次操作按钮）、图标、主题仅启动时应用、18 状态无头预览 |
